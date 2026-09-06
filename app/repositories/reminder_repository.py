@@ -1,0 +1,47 @@
+"""Reminders are drained by the cron tick, cross-tenant, same SKIP LOCKED
+claim pattern as inbound_jobs — see ARCHITECTURE.md's job queue section.
+Not a TenantScopedRepository for the same reason InboundJobRepository isn't.
+"""
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.reminder import Reminder
+
+
+class ReminderRepository:
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def create(
+        self, task_id: uuid.UUID, team_id: str, fire_at_utc: datetime, escalation_level: int
+    ) -> Reminder:
+        reminder = Reminder(
+            task_id=task_id,
+            team_id=team_id,
+            fire_at_utc=fire_at_utc,
+            escalation_level=escalation_level,
+        )
+        self._session.add(reminder)
+        await self._session.flush()
+        return reminder
+
+    async def claim_due_batch(self, limit: int = 10) -> list[Reminder]:
+        stmt = (
+            select(Reminder)
+            .where(Reminder.fire_at_utc <= datetime.now(UTC), Reminder.sent_at.is_(None))
+            .order_by(Reminder.fire_at_utc)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def mark_sent(self, reminder_id: uuid.UUID) -> None:
+        reminder = await self._session.get(Reminder, reminder_id)
+        if reminder is not None:
+            reminder.sent_at = datetime.now(UTC)
+            await self._session.flush()

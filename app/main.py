@@ -8,8 +8,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.routes_commands import router as commands_router
 from app.api.routes_events import router as events_router
 from app.api.routes_install import router as install_router
+from app.api.routes_internal import router as internal_router
 from app.core.config import settings
 from app.worker import run_worker_loop
 
@@ -33,6 +35,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(install_router)
 app.include_router(events_router)
+app.include_router(commands_router)
+app.include_router(internal_router)
 
 
 @app.get("/health")
