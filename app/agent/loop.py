@@ -1,22 +1,30 @@
 """The natural-language layer, added last per ARCHITECTURE.md's
 tools-first-LLM-last principle. The model only ever picks a tool from
 app/agent/tools.py's whitelist — it never touches the database directly and
-never supplies team_id/slack_user_id itself.
+never supplies team_id/slack_user_id itself; those live on AgentContext,
+built server-side from the authenticated Slack event.
 """
+
+from datetime import UTC, datetime
 
 import httpx
 from pydantic import ValidationError
 
-from app.agent.tools import TOOLS
+from app.agent.tools import TOOLS, AgentContext
 
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "openai/gpt-oss-120b"
 
-SYSTEM_PROMPT = (
-    "You are a workplace assistant. You can create and list tasks for the "
-    "current user by calling the provided tools. Never invent information; "
-    "if a request doesn't map to an available tool, say so plainly."
-)
+
+def _system_prompt() -> str:
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    return (
+        f"You are a workplace assistant. Today's date is {today} (UTC). You can "
+        "create and list tasks, and propose meeting times, for the current user by "
+        "calling the provided tools. All dates you pass to tools must be ISO 8601 "
+        "with an explicit UTC offset — never omit the timezone. Never invent "
+        "information; if a request doesn't map to an available tool, say so plainly."
+    )
 
 
 class AgentError(Exception):
@@ -42,7 +50,7 @@ async def _call_groq(
         raise AgentError(f"unexpected Groq response shape: {exc}") from exc
 
 
-async def _execute_tool_call(session, team_id: str, slack_user_id: str, call: dict) -> str:
+async def _execute_tool_call(ctx: AgentContext, call: dict) -> str:
     name = call["function"]["name"]
     tool = TOOLS.get(name)
     if tool is None:
@@ -56,21 +64,19 @@ async def _execute_tool_call(session, team_id: str, slack_user_id: str, call: di
     except (ValidationError, ValueError) as exc:
         return f"Invalid arguments for {name}: {exc}"
 
-    return await tool.handler(session, team_id, slack_user_id, args)
+    return await tool.handler(ctx, args)
 
 
 async def run_agent_turn(
-    session,
+    ctx: AgentContext,
     http_client: httpx.AsyncClient,
     api_key: str,
     *,
-    team_id: str,
-    slack_user_id: str,
     user_message: str,
 ) -> str:
     tool_schemas = [tool.to_openai_schema() for tool in TOOLS.values()]
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": user_message},
     ]
 
@@ -81,7 +87,7 @@ async def run_agent_turn(
 
     messages.append(message)
     for call in tool_calls:
-        result_text = await _execute_tool_call(session, team_id, slack_user_id, call)
+        result_text = await _execute_tool_call(ctx, call)
         messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
 
     final_message = await _call_groq(http_client, api_key, messages)

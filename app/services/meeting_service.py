@@ -41,14 +41,19 @@ async def propose_meeting(
     timezone_by_participant = {}
     unavailable: list[str] = []
 
-    # Every participant needs a `users` row to satisfy MeetingParticipant's FK
-    # below, whether or not they've ever linked a calendar — being invited to
-    # a meeting is a lighter-weight interaction than linking one.
-    await users.get_or_create(organiser_slack_id, team_id, tz="UTC")
-    for slack_user_id in participant_slack_ids:
+    # The organiser's own availability must be checked too — a caller
+    # forgetting to include themselves in participant_slack_ids would
+    # otherwise silently produce a slot the organiser can't attend. Dedupe
+    # while preserving order, in case the caller included them anyway.
+    all_participants = list(dict.fromkeys([organiser_slack_id, *participant_slack_ids]))
+
+    # Everyone needs a `users` row to satisfy MeetingParticipant's FK below,
+    # whether or not they've ever linked a calendar — being invited to a
+    # meeting is a lighter-weight interaction than linking one.
+    for slack_user_id in all_participants:
         await users.get_or_create(slack_user_id, team_id, tz="UTC")
 
-    for slack_user_id in participant_slack_ids:
+    for slack_user_id in all_participants:
         user = await users.get(slack_user_id)
         if user.google_refresh_token_enc is None or user.google_link_broken_at:
             unavailable.append(slack_user_id)
@@ -92,7 +97,6 @@ async def propose_meeting(
 
     from app.models.meeting import MeetingParticipant
 
-    all_participants = {organiser_slack_id, *participant_slack_ids}
     for slack_user_id in all_participants:
         session.add(
             MeetingParticipant(meeting_id=meeting.id, team_id=team_id, slack_user_id=slack_user_id)

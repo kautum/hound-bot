@@ -1,17 +1,23 @@
-"""The `/task` slash command. Fast, deterministic CRUD — no LLM, no ack-and-
-enqueue needed, since these operations are quick enough to answer inline
-within Slack's 3-second budget. See ARCHITECTURE.md's tools-first section.
+"""Slash commands. All fast, deterministic paths — no LLM, no ack-and-enqueue
+needed, since these operations are quick enough to answer inline within
+Slack's 3-second budget. See ARCHITECTURE.md's tools-first section. Slack
+lets multiple slash commands share one request URL, dispatched by the
+`command` field — that's what this router does first.
 """
 
 import uuid
+from datetime import timedelta
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.calendar.google_calendar import GoogleCalendarProvider
 from app.core.config import settings
 from app.core.db import get_session
-from app.core.security import verify_slack_signature
-from app.services import task_service
+from app.core.security import token_cipher_from_settings, verify_slack_signature
+from app.services import meeting_service, task_service
+from app.services.meet_command_parser import MeetCommandError, parse_meet_command
 from app.services.task_command_parser import TaskCommandError, parse_task_add
 
 router = APIRouter()
@@ -21,20 +27,7 @@ def _ephemeral(text: str) -> dict:
     return {"response_type": "ephemeral", "text": text}
 
 
-@router.post("/slack/commands")
-async def slack_commands(
-    request: Request, session: AsyncSession = Depends(get_session)
-) -> dict:
-    raw_body = await request.body()
-    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
-    signature = request.headers.get("X-Slack-Signature", "")
-
-    if not settings.slack_signing_secret:
-        raise HTTPException(status_code=500, detail="SLACK_SIGNING_SECRET is not configured")
-    if not verify_slack_signature(raw_body, timestamp, signature, settings.slack_signing_secret):
-        raise HTTPException(status_code=401, detail="invalid Slack signature")
-
-    form = await request.form()
+async def _handle_task_command(session: AsyncSession, form) -> dict:
     text = str(form.get("text", "")).strip()
     team_id = str(form.get("team_id", ""))
     user_id = str(form.get("user_id", ""))
@@ -86,3 +79,93 @@ async def slack_commands(
         "`/task list`\n"
         "`/task done <task-id>`"
     )
+
+
+def _link_calendar_url(team_id: str, slack_user_id: str) -> str:
+    if not settings.public_base_url:
+        raise HTTPException(status_code=500, detail="PUBLIC_BASE_URL is not configured")
+    base = settings.public_base_url.rstrip("/")
+    return f"{base}/google/link?team_id={team_id}&slack_user_id={slack_user_id}"
+
+
+async def _handle_link_calendar_command(form) -> dict:
+    team_id = str(form.get("team_id", ""))
+    user_id = str(form.get("user_id", ""))
+    url = _link_calendar_url(team_id, user_id)
+    return _ephemeral(f"Link your Google Calendar: {url}")
+
+
+async def _handle_meet_command(session: AsyncSession, form) -> dict:
+    text = str(form.get("text", "")).strip()
+    team_id = str(form.get("team_id", ""))
+    organiser_id = str(form.get("user_id", ""))
+
+    try:
+        participants, duration_minutes, window_start, window_end = parse_meet_command(text)
+    except MeetCommandError as exc:
+        return _ephemeral(str(exc))
+
+    calendar_configured = bool(
+        settings.google_client_id and settings.google_client_secret and settings.encryption_key
+    )
+    if not calendar_configured:
+        return _ephemeral("Calendar scheduling isn't configured on this workspace yet.")
+
+    cipher = token_cipher_from_settings(settings)
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        provider = GoogleCalendarProvider(
+            http_client,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
+        result = await meeting_service.propose_meeting(
+            session,
+            provider,
+            cipher,
+            team_id=team_id,
+            organiser_slack_id=organiser_id,
+            participant_slack_ids=participants,
+            duration=timedelta(minutes=duration_minutes),
+            search_window_start_utc=window_start,
+            search_window_end_utc=window_end,
+        )
+    await session.commit()
+
+    if result.meeting is None:
+        return _ephemeral("No mutual free slot exists in that window for the linked calendars.")
+
+    note = ""
+    if result.unavailable_participants:
+        names = ", ".join(f"<@{p}>" for p in result.unavailable_participants)
+        note = f"\n(Couldn't check {names} — not linked yet: `/link-calendar`)"
+
+    return _ephemeral(
+        f"Earliest mutual slot: {result.slot_start_utc.isoformat()} UTC, "
+        f"{duration_minutes} min. Meeting id {result.meeting.id} (not booked yet).{note}"
+    )
+
+
+@router.post("/slack/commands")
+async def slack_commands(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> dict:
+    raw_body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    if not settings.slack_signing_secret:
+        raise HTTPException(status_code=500, detail="SLACK_SIGNING_SECRET is not configured")
+    if not verify_slack_signature(raw_body, timestamp, signature, settings.slack_signing_secret):
+        raise HTTPException(status_code=401, detail="invalid Slack signature")
+
+    form = await request.form()
+    command = str(form.get("command", ""))
+
+    if command == "/task":
+        return await _handle_task_command(session, form)
+    if command == "/link-calendar":
+        return await _handle_link_calendar_command(form)
+    if command == "/meet":
+        return await _handle_meet_command(session, form)
+
+    return _ephemeral(f"Unknown command {command!r}.")

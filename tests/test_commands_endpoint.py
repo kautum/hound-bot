@@ -94,3 +94,105 @@ class TestSlackCommandsEndpoint:
         )
         assert response.status_code == 200
         assert "Usage" in response.json()["text"]
+
+    async def test_unknown_command_does_not_crash(self, api_client, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        body = _form_body(command="/nonexistent", text="", team_id="T1", user_id="U1")
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
+        assert response.status_code == 200
+        assert "Unknown command" in response.json()["text"]
+
+
+class TestLinkCalendarCommand:
+    async def test_returns_a_link_url(self, api_client, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        monkeypatch.setattr(
+            "app.api.routes_commands.settings.public_base_url", "https://example.ngrok-free.app"
+        )
+        body = _form_body(command="/link-calendar", text="", team_id="T1", user_id="U1")
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
+        text = response.json()["text"]
+        assert "https://example.ngrok-free.app/google/link" in text
+        assert "team_id=T1" in text
+        assert "slack_user_id=U1" in text
+
+
+class TestMeetCommand:
+    async def test_bad_syntax_returns_usage(self, api_client, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        body = _form_body(command="/meet", text="nonsense", team_id="T1", user_id="U1")
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
+        assert "Usage" in response.json()["text"]
+
+    async def test_degrades_gracefully_when_calendar_not_configured(self, api_client, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", None)
+        body = _form_body(
+            command="/meet",
+            text="<@U2> 30 | 2026-09-10T09:00+00:00 | 2026-09-10T17:00+00:00",
+            team_id="T1",
+            user_id="U1",
+        )
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
+        assert "isn't configured" in response.json()["text"]
+
+    async def test_finds_and_reports_a_slot(self, api_client, db_session, monkeypatch):
+        import httpx
+        import respx
+        from cryptography.fernet import Fernet
+
+        from app.calendar.google_calendar import GOOGLE_FREEBUSY_URL, GOOGLE_TOKEN_URL
+        from app.core.security import TokenCipher
+        from app.models import User
+
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_secret", "gsecret")
+        key = Fernet.generate_key().decode()
+        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key", key)
+        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key_version", 1)
+
+        await _make_workspace(db_session, "T1")
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        token_enc, version = cipher.encrypt("tok-alice")
+        db_session.add(
+            User(
+                slack_user_id="U1",
+                team_id="T1",
+                tz="UTC",
+                google_refresh_token_enc=token_enc,
+                key_version=version,
+                google_email="a@x.com",
+            )
+        )
+        await db_session.commit()
+
+        with respx.mock:
+            respx.post(GOOGLE_TOKEN_URL).mock(
+                return_value=httpx.Response(200, json={"access_token": "ya29.fake"})
+            )
+            respx.post(GOOGLE_FREEBUSY_URL).mock(
+                return_value=httpx.Response(200, json={"calendars": {"primary": {"busy": []}}})
+            )
+
+            body = _form_body(
+                command="/meet",
+                text="<@U1> 30 | 2026-09-07T09:00:00+00:00 | 2026-09-07T17:00:00+00:00",
+                team_id="T1",
+                user_id="U1",
+            )
+            response = await api_client.post(
+                "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+            )
+
+        text = response.json()["text"]
+        assert "Earliest mutual slot" in text
+        assert "2026-09-07T09:00:00+00:00" in text

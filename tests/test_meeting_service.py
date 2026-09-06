@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
 
-from app.calendar.provider import InvalidGrantError
+from app.calendar.provider import BusyBlock, InvalidGrantError
 from app.core.security import TokenCipher
 from app.models import User, Workspace
 from app.services.meeting_service import book_meeting, propose_meeting
@@ -87,6 +87,45 @@ class TestProposeMeeting:
         assert result.meeting is not None
         assert result.slot_start_utc == window_start
         assert result.unavailable_participants == []
+
+    async def test_organiser_own_availability_is_checked_even_when_not_in_the_participant_list(
+        self, db_session
+    ):
+        """The bug this test exists to catch: a caller (a slash command, an
+        agent tool) that only passes the *other* invitees would otherwise
+        propose a slot the organiser themselves is double-booked for."""
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await db_session.commit()
+
+        busy_9_to_10 = [
+            BusyBlock(
+                start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+                end_utc=datetime(2026, 9, 7, 10, 0, tzinfo=UTC),
+            )
+        ]
+        provider = FakeProvider(busy_by_token={"tok-alice": busy_9_to_10})
+
+        # Note: organiser "U_ALICE" is deliberately NOT included here.
+        result = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=[],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+
+        assert result.meeting is not None
+        # If the organiser's own busy block were ignored, this would be 9:00.
+        assert result.slot_start_utc == datetime(2026, 9, 7, 10, 0, tzinfo=UTC)
 
     async def test_unlinked_participant_is_excluded_but_reported(self, db_session):
         await _make_workspace(db_session, "team-A")
