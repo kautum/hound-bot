@@ -6,12 +6,14 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "slack-bolt>=1.21",
+    "slack-sdk>=3.33",
+    "aiohttp>=3.10",
     "sqlalchemy[asyncio]>=2.0",
     "alembic>=1.13",
     "asyncpg>=0.29",
     "cryptography>=43.0",
     "pydantic-settings>=2.5",
+    "pydantic>=2.9",
     "httpx>=0.27",
 ]
 
@@ -20,6 +22,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.7",
+    "respx>=0.21",
 ]
 
 [tool.ruff]
@@ -28,6 +31,9 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008 flags `Depends(...)` in argument defaults — that's FastAPI's own
+# documented dependency-injection idiom, not a bug.
+ignore = ["B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

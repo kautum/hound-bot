@@ -15,6 +15,11 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/slack_workplace_assistant"
 
+    # The dev ngrok tunnel URL locally, the Render URL in prod. See
+    # ARCHITECTURE.md — dev and prod are separate Slack apps with separate
+    # redirect URIs built from this value.
+    public_base_url: str | None = None
+
     slack_client_id: str | None = None
     slack_client_secret: str | None = None
     slack_signing_secret: str | None = None
