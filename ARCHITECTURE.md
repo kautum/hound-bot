@@ -73,6 +73,18 @@ flowchart TB
 (calendar queries, LLM calls, Slack replies) happens afterward on the in-process worker, which
 posts the result back as a *new* message rather than a synchronous reply.
 
+**This applies to slash commands too, not just events** — and getting it wrong once already
+cost a real bug. `/task` and `/link-calendar` are pure DB reads/writes with no network calls,
+so answering inline within the request is correct. `/meet`'s propose path makes one real Google
+API call *per participant*; it enqueues an `inbound_jobs` row (`event_type="meet_propose"`) and
+acks immediately, and the worker's `handle_meet_propose` posts the real answer to Slack's
+`response_url` once it's done (valid for 30 minutes after the original command). The first
+version of `/meet` called Google synchronously inside the request handler — it worked in every
+test because tests don't have Slack's 3-second clock running, and would have silently timed out
+in production the first time someone proposed a meeting with more than one or two participants.
+**Any new command that makes a network call needs to ask this question before it ships:** could
+this exceed 3 seconds with a slow network or a few extra participants? If yes, enqueue it.
+
 **The cron tick does two jobs with one mechanism.** It drains the reminders/jobs table (the
 scheduler's job) and it keeps Render's free service from spinning down after 15 minutes of
 idle, which would otherwise turn every cold request into a 30–60s stall that blows the 3-second

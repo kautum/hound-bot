@@ -6,7 +6,6 @@ lets multiple slash commands share one request URL, dispatched by the
 """
 
 import uuid
-from datetime import timedelta
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +15,7 @@ from app.calendar.google_calendar import GoogleCalendarProvider
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import token_cipher_from_settings, verify_slack_signature
+from app.repositories.inbound_job_repository import InboundJobRepository
 from app.services import meeting_service, task_service
 from app.services.meet_command_parser import MeetCommandError, parse_meet_command
 from app.services.task_command_parser import TaskCommandError, parse_task_add
@@ -95,7 +95,9 @@ async def _handle_link_calendar_command(form) -> dict:
     return _ephemeral(f"Link your Google Calendar: {url}")
 
 
-async def _handle_meet_book(session: AsyncSession, team_id: str, raw_id: str) -> dict:
+async def _handle_meet_book(
+    session: AsyncSession, team_id: str, requesting_user_id: str, raw_id: str
+) -> dict:
     try:
         meeting_id = uuid.UUID(raw_id)
     except ValueError:
@@ -121,6 +123,7 @@ async def _handle_meet_book(session: AsyncSession, team_id: str, raw_id: str) ->
                 cipher,
                 team_id=team_id,
                 meeting_id=meeting_id,
+                requesting_slack_user_id=requesting_user_id,
                 title="Meeting",
             )
         except meeting_service.MeetingConfirmationError as exc:
@@ -134,9 +137,12 @@ async def _handle_meet_command(session: AsyncSession, form) -> dict:
     text = str(form.get("text", "")).strip()
     team_id = str(form.get("team_id", ""))
     organiser_id = str(form.get("user_id", ""))
+    response_url = str(form.get("response_url", ""))
 
     if text.startswith("book "):
-        return await _handle_meet_book(session, team_id, text.removeprefix("book ").strip())
+        return await _handle_meet_book(
+            session, team_id, organiser_id, text.removeprefix("book ").strip()
+        )
 
     try:
         participants, duration_minutes, window_start, window_end = parse_meet_command(text)
@@ -149,38 +155,27 @@ async def _handle_meet_command(session: AsyncSession, form) -> dict:
     if not calendar_configured:
         return _ephemeral("Calendar scheduling isn't configured on this workspace yet.")
 
-    cipher = token_cipher_from_settings(settings)
-    async with httpx.AsyncClient(timeout=10.0) as http_client:
-        provider = GoogleCalendarProvider(
-            http_client,
-            client_id=settings.google_client_id,
-            client_secret=settings.google_client_secret,
-        )
-        result = await meeting_service.propose_meeting(
-            session,
-            provider,
-            cipher,
-            team_id=team_id,
-            organiser_slack_id=organiser_id,
-            participant_slack_ids=participants,
-            duration=timedelta(minutes=duration_minutes),
-            search_window_start_utc=window_start,
-            search_window_end_utc=window_end,
-        )
+    # Finding a slot makes one real Google API call per participant — far
+    # too slow to fit inside Slack's 3-second ack budget with more than a
+    # couple of people. Enqueue it and reply via `response_url` once it's
+    # done, the same ack-and-enqueue shape /slack/events uses. See
+    # ARCHITECTURE.md's 3-second rule — this used to run inline here, which
+    # was a real bug, not a stylistic choice.
+    await InboundJobRepository(session).enqueue(
+        team_id=team_id,
+        event_type="meet_propose",
+        payload={
+            "organiser_id": organiser_id,
+            "participant_slack_ids": participants,
+            "duration_minutes": duration_minutes,
+            "window_start_utc": window_start.isoformat(),
+            "window_end_utc": window_end.isoformat(),
+            "response_url": response_url,
+        },
+    )
     await session.commit()
 
-    if result.meeting is None:
-        return _ephemeral("No mutual free slot exists in that window for the linked calendars.")
-
-    note = ""
-    if result.unavailable_participants:
-        names = ", ".join(f"<@{p}>" for p in result.unavailable_participants)
-        note = f"\n(Couldn't check {names} — not linked yet: `/link-calendar`)"
-
-    return _ephemeral(
-        f"Earliest mutual slot: {result.slot_start_utc.isoformat()} UTC, "
-        f"{duration_minutes} min. Run `/meet book {result.meeting.id}` to book it.{note}"
-    )
+    return _ephemeral("Looking for a mutual free slot — I'll follow up here shortly.")
 
 
 @router.post("/slack/commands")

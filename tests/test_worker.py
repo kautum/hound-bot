@@ -6,9 +6,10 @@ import respx
 from cryptography.fernet import Fernet
 
 from app.agent.loop import GROQ_CHAT_URL
+from app.calendar.google_calendar import GOOGLE_FREEBUSY_URL, GOOGLE_TOKEN_URL
 from app.core.security import TokenCipher
-from app.models import InboundJob, Workspace
-from app.worker import _strip_bot_mention, handle_app_mention
+from app.models import InboundJob, User, Workspace
+from app.worker import _strip_bot_mention, handle_app_mention, handle_meet_propose
 
 
 class FakeSlackClient:
@@ -160,3 +161,109 @@ class TestHandleAppMention:
         tasks = await list_open_tasks(db_session, team_id="team-A", assignee_slack_id="U1")
         assert len(tasks) == 1
         assert tasks[0].title == "File the report"
+
+
+def _make_meet_job(team_id: str, payload: dict) -> InboundJob:
+    return InboundJob(
+        team_id=team_id,
+        event_type="meet_propose",
+        payload=payload,
+        status="pending",
+        created_at=datetime.now(UTC),
+    )
+
+
+class TestHandleMeetPropose:
+    """The exact fix this closes: propose used to run inline in the slash
+    command handler, one real Google API call per participant — a direct
+    violation of ARCHITECTURE.md's 3-second rule. It's now a queued job."""
+
+    @respx.mock
+    async def test_posts_to_response_url_when_not_configured(self, monkeypatch, db_session):
+        monkeypatch.setattr("app.worker.settings.google_client_id", None)
+
+        response_url_route = respx.post("https://hooks.slack.invalid/fake").mock(
+            return_value=httpx.Response(200, json={"ok": True})
+        )
+
+        job = _make_meet_job(
+            "team-A",
+            {
+                "organiser_id": "U1",
+                "participant_slack_ids": ["U2"],
+                "duration_minutes": 30,
+                "window_start_utc": "2026-09-07T09:00:00+00:00",
+                "window_end_utc": "2026-09-07T17:00:00+00:00",
+                "response_url": "https://hooks.slack.invalid/fake",
+            },
+        )
+        cipher = TokenCipher(keys={1: Fernet.generate_key().decode()}, current_version=1)
+        await handle_meet_propose(db_session, job, cipher)
+
+        sent = json.loads(response_url_route.calls.last.request.content)
+        assert "isn't configured" in sent["text"]
+
+    @respx.mock
+    async def test_finds_a_slot_and_posts_the_result(self, monkeypatch, db_session):
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        token_enc, version = cipher.encrypt("tok-alice")
+
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+        db_session.add(
+            User(
+                slack_user_id="U1",
+                team_id="team-A",
+                tz="UTC",
+                google_refresh_token_enc=token_enc,
+                key_version=version,
+                google_email="a@x.com",
+            )
+        )
+        await db_session.commit()
+
+        monkeypatch.setattr("app.worker.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.worker.settings.google_client_secret", "gsecret")
+
+        respx.post(GOOGLE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "ya29.fake"})
+        )
+        respx.post(GOOGLE_FREEBUSY_URL).mock(
+            return_value=httpx.Response(200, json={"calendars": {"primary": {"busy": []}}})
+        )
+        response_url_route = respx.post("https://hooks.slack.invalid/fake").mock(
+            return_value=httpx.Response(200, json={"ok": True})
+        )
+
+        job = _make_meet_job(
+            "team-A",
+            {
+                "organiser_id": "U1",
+                "participant_slack_ids": [],
+                "duration_minutes": 30,
+                "window_start_utc": "2026-09-07T09:00:00+00:00",
+                "window_end_utc": "2026-09-07T17:00:00+00:00",
+                "response_url": "https://hooks.slack.invalid/fake",
+            },
+        )
+        await handle_meet_propose(db_session, job, cipher)
+
+        sent = json.loads(response_url_route.calls.last.request.content)
+        assert "Earliest mutual slot" in sent["text"]
+        assert "2026-09-07T09:00:00+00:00" in sent["text"]
+
+    async def test_missing_response_url_does_not_crash(self, monkeypatch, db_session):
+        monkeypatch.setattr("app.worker.settings.google_client_id", None)
+        job = _make_meet_job(
+            "team-A",
+            {
+                "organiser_id": "U1",
+                "participant_slack_ids": ["U2"],
+                "duration_minutes": 30,
+                "window_start_utc": "2026-09-07T09:00:00+00:00",
+                "window_end_utc": "2026-09-07T17:00:00+00:00",
+                "response_url": "",
+            },
+        )
+        cipher = TokenCipher(keys={1: Fernet.generate_key().decode()}, current_version=1)
+        await handle_meet_propose(db_session, job, cipher)  # must not raise

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import time
 from datetime import UTC, datetime
 
@@ -144,60 +145,46 @@ class TestMeetCommand:
         )
         assert "isn't configured" in response.json()["text"]
 
-    async def test_finds_and_reports_a_slot(self, api_client, db_session, monkeypatch):
-        import httpx
-        import respx
-        from cryptography.fernet import Fernet
-
-        from app.calendar.google_calendar import GOOGLE_FREEBUSY_URL, GOOGLE_TOKEN_URL
-        from app.core.security import TokenCipher
-        from app.models import User
-
+    async def test_propose_enqueues_and_acks_immediately(self, api_client, db_session, monkeypatch):
+        """/meet's propose path must never call Google inline — see
+        ARCHITECTURE.md's 3-second rule. This asserts the ack is instant and
+        a job is queued; app.worker.handle_meet_propose does the real work,
+        tested separately in tests/test_worker.py."""
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
         monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", "gcid")
         monkeypatch.setattr("app.api.routes_commands.settings.google_client_secret", "gsecret")
-        key = Fernet.generate_key().decode()
-        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key", key)
-        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key_version", 1)
-
+        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key", "irrelevant-here")
         await _make_workspace(db_session, "T1")
-        cipher = TokenCipher(keys={1: key}, current_version=1)
-        token_enc, version = cipher.encrypt("tok-alice")
-        db_session.add(
-            User(
-                slack_user_id="U1",
-                team_id="T1",
-                tz="UTC",
-                google_refresh_token_enc=token_enc,
-                key_version=version,
-                google_email="a@x.com",
-            )
+
+        body = _form_body(
+            command="/meet",
+            text="<@U2> 30 | 2026-09-07T09:00:00+00:00 | 2026-09-07T17:00:00+00:00",
+            team_id="T1",
+            user_id="U1",
+            response_url="https://hooks.slack.invalid/commands/fake",
         )
-        await db_session.commit()
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
 
-        with respx.mock:
-            respx.post(GOOGLE_TOKEN_URL).mock(
-                return_value=httpx.Response(200, json={"access_token": "ya29.fake"})
-            )
-            respx.post(GOOGLE_FREEBUSY_URL).mock(
-                return_value=httpx.Response(200, json={"calendars": {"primary": {"busy": []}}})
-            )
+        assert "Looking for a mutual free slot" in response.json()["text"]
 
-            body = _form_body(
-                command="/meet",
-                text="<@U1> 30 | 2026-09-07T09:00:00+00:00 | 2026-09-07T17:00:00+00:00",
-                team_id="T1",
-                user_id="U1",
-            )
-            response = await api_client.post(
-                "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
-            )
+        from sqlalchemy import select
 
-        text = response.json()["text"]
-        assert "Earliest mutual slot" in text
-        assert "2026-09-07T09:00:00+00:00" in text
+        from app.models import InboundJob
+
+        result = await db_session.execute(
+            select(InboundJob).filter_by(team_id="T1", event_type="meet_propose")
+        )
+        jobs = result.scalars().all()
+        assert len(jobs) == 1
+        assert jobs[0].payload["organiser_id"] == "U1"
+        assert jobs[0].payload["participant_slack_ids"] == ["U2"]
+        assert jobs[0].payload["response_url"] == "https://hooks.slack.invalid/commands/fake"
 
     async def test_propose_then_book_end_to_end(self, api_client, db_session, monkeypatch):
+        """Full round trip: enqueue via the endpoint, run the worker handler
+        that would normally process it, then book via the endpoint again."""
         import httpx
         import respx
         from cryptography.fernet import Fernet
@@ -209,10 +196,13 @@ class TestMeetCommand:
         )
         from app.core.security import TokenCipher
         from app.models import User
+        from app.worker import handle_meet_propose
 
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
         monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", "gcid")
         monkeypatch.setattr("app.api.routes_commands.settings.google_client_secret", "gsecret")
+        monkeypatch.setattr("app.worker.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.worker.settings.google_client_secret", "gsecret")
         key = Fernet.generate_key().decode()
         monkeypatch.setattr("app.api.routes_commands.settings.encryption_key", key)
         monkeypatch.setattr("app.api.routes_commands.settings.encryption_key_version", 1)
@@ -232,6 +222,8 @@ class TestMeetCommand:
         )
         await db_session.commit()
 
+        response_url = "https://hooks.slack.invalid/commands/fake"
+
         with respx.mock:
             respx.post(GOOGLE_TOKEN_URL).mock(
                 return_value=httpx.Response(200, json={"access_token": "ya29.fake"})
@@ -239,19 +231,42 @@ class TestMeetCommand:
             respx.post(GOOGLE_FREEBUSY_URL).mock(
                 return_value=httpx.Response(200, json={"calendars": {"primary": {"busy": []}}})
             )
+            response_url_route = respx.post(response_url).mock(
+                return_value=httpx.Response(200, json={"ok": True})
+            )
 
             propose_body = _form_body(
                 command="/meet",
                 text="<@U1> 30 | 2026-09-07T09:00:00+00:00 | 2026-09-07T17:00:00+00:00",
                 team_id="T1",
                 user_id="U1",
+                response_url=response_url,
             )
             propose_response = await api_client.post(
                 "/slack/commands",
                 content=propose_body,
                 headers=_signed_form_headers(propose_body, SIGNING_SECRET),
             )
-            meeting_id = propose_response.json()["text"].split("/meet book ")[1].split("`")[0]
+            assert "Looking for a mutual free slot" in propose_response.json()["text"]
+
+            from sqlalchemy import select as sa_select
+
+            from app.models import InboundJob
+
+            job_result = await db_session.execute(
+                sa_select(InboundJob).filter_by(team_id="T1", event_type="meet_propose")
+            )
+            job = job_result.scalars().one()
+
+            # This is what the worker loop would do automatically in
+            # production — invoked directly here since this test doesn't
+            # run the whole polling loop.
+            await handle_meet_propose(db_session, job, cipher)
+
+            follow_up_text = json.loads(response_url_route.calls.last.request.content)["text"]
+            assert "Earliest mutual slot" in follow_up_text
+            assert "2026-09-07T09:00:00+00:00" in follow_up_text
+            meeting_id = follow_up_text.split("/meet book ")[1].split("`")[0]
 
             respx.post(GOOGLE_EVENTS_URL).mock(
                 return_value=httpx.Response(200, json={"id": "evt_end_to_end"})

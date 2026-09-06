@@ -147,16 +147,25 @@ async def confirm_meeting(
     *,
     team_id: str,
     meeting_id: uuid.UUID,
+    requesting_slack_user_id: str,
     title: str,
 ) -> Meeting:
     """The path a slash command or agent tool actually calls to turn a
     proposed slot into a real calendar event, using the slot persisted by
     propose_meeting rather than re-running the availability search (which
-    could legitimately return a different answer by the time this runs)."""
+    could legitimately return a different answer by the time this runs).
+
+    Only the organiser may confirm: booking creates the event on *their*
+    calendar using *their* credentials, so anyone else doing it would be
+    spending the organiser's Google account without their say-so — a real
+    authorisation boundary, not a formality.
+    """
     result = await session.execute(select(Meeting).filter_by(id=meeting_id, team_id=team_id))
     meeting = result.scalar_one_or_none()
     if meeting is None:
         raise MeetingConfirmationError("No meeting with that id in this workspace.")
+    if meeting.organiser_slack_id != requesting_slack_user_id:
+        raise MeetingConfirmationError("Only the meeting organiser can book it.")
     if meeting.status != STATUS_PROPOSED:
         raise MeetingConfirmationError(f"Meeting is already {meeting.status}.")
     if meeting.proposed_start_utc is None:

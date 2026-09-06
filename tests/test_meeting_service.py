@@ -276,12 +276,55 @@ class TestConfirmMeeting:
             cipher,
             team_id="team-A",
             meeting_id=proposal.meeting.id,
+            requesting_slack_user_id="U_ALICE",
             title="Sync",
         )
 
         assert booked.google_event_id == "evt_999"
         # Both linked participants, including the non-organiser, get invited.
         assert sorted(provider.created_events[0]["attendees"]) == ["a@x.com", "b@x.com"]
+
+    async def test_rejects_booking_by_anyone_other_than_the_organiser(self, db_session):
+        """The gap this closes: booking spends the *organiser's* Google
+        credentials, so anyone else confirming it would be using someone
+        else's calendar account without their say-so."""
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await _make_linked_user(
+            db_session, cipher, "U_BOB", "team-A", "UTC", "tok-bob", "b@x.com"
+        )
+        await db_session.commit()
+
+        provider = FakeProvider(busy_by_token={})
+        proposal = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=["U_BOB"],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+        await db_session.commit()
+
+        from app.services.meeting_service import MeetingConfirmationError, confirm_meeting
+
+        with pytest.raises(MeetingConfirmationError, match="Only the meeting organiser"):
+            await confirm_meeting(
+                db_session,
+                provider,
+                cipher,
+                team_id="team-A",
+                meeting_id=proposal.meeting.id,
+                requesting_slack_user_id="U_BOB",  # a real participant, but not the organiser
+                title="Sync",
+            )
 
     async def test_rejects_booking_an_unknown_meeting(self, db_session):
         import uuid
@@ -297,6 +340,7 @@ class TestConfirmMeeting:
                 cipher,
                 team_id="team-A",
                 meeting_id=uuid.uuid4(),
+                requesting_slack_user_id="U_ALICE",
                 title="Sync",
             )
 
@@ -331,6 +375,7 @@ class TestConfirmMeeting:
             cipher,
             team_id="team-A",
             meeting_id=proposal.meeting.id,
+            requesting_slack_user_id="U_ALICE",
             title="Sync",
         )
         await db_session.commit()
@@ -342,5 +387,6 @@ class TestConfirmMeeting:
                 cipher,
                 team_id="team-A",
                 meeting_id=proposal.meeting.id,
+                requesting_slack_user_id="U_ALICE",
                 title="Sync",
             )
