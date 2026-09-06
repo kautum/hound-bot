@@ -6,10 +6,13 @@ slot. Every external service in the stack is free-tier — see `ARCHITECTURE.md`
 
 ## Status
 
-**All seven phases of the code are built and tested (82 tests, all passing against real
-Postgres).** What's *not* done yet: the accounts, deployment, and Google verification —
-none of that can happen without live credentials only you can create. See `RUNBOOK.md`
-for exactly what's left and in what order.
+**All seven phases of the code are built and tested (112 tests, all passing against real
+Postgres).** Read `PROJECT-WIKI.md` before changing anything — it has the module map, the
+Devin usage guide, and the specific bugs three review passes found (each one caught something
+a passing test suite had been hiding). What's *not* built at all: Block Kit UI (everything is
+plain text), observability, timeouts/backoff, and load testing. What's not *done* yet: the
+accounts, deployment, and Google verification — none of that can happen without live
+credentials only you can create. See `RUNBOOK.md` for exactly what's left and in what order.
 
 | Phase | What it covers |
 |---|---|
@@ -57,3 +60,6 @@ than sent back for a second billed round trip.
 The complete architecture, security model, and phase-by-phase build plan live at
 `~/.claude/plans/alright-now-lets-glistening-yeti.md`. `ARCHITECTURE.md` in this repo is
 the condensed, code-facing version — read that one first if you're picking up the code.
+**`PROJECT-WIKI.md` is the operational companion**: module map, known gotchas, and exactly
+how to use Devin for what's left. Read it before `ARCHITECTURE.md` if you're resuming work
+rather than reading for the first time.
