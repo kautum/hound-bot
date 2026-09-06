@@ -6,7 +6,7 @@ assignee once assignment is open to anyone. See ARCHITECTURE.md's data model sec
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, ForeignKey, Index
 from sqlalchemy.orm import Mapped, mapped_column
@@ -31,3 +31,6 @@ class Task(Base):
     due_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(nullable=False, default=STATUS_OPEN)
     channel_id: Mapped[str] = mapped_column(nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
