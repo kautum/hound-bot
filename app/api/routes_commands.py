@@ -95,10 +95,48 @@ async def _handle_link_calendar_command(form) -> dict:
     return _ephemeral(f"Link your Google Calendar: {url}")
 
 
+async def _handle_meet_book(session: AsyncSession, team_id: str, raw_id: str) -> dict:
+    try:
+        meeting_id = uuid.UUID(raw_id)
+    except ValueError:
+        return _ephemeral(f"{raw_id!r} isn't a valid meeting ID.")
+
+    calendar_configured = bool(
+        settings.google_client_id and settings.google_client_secret and settings.encryption_key
+    )
+    if not calendar_configured:
+        return _ephemeral("Calendar scheduling isn't configured on this workspace yet.")
+
+    cipher = token_cipher_from_settings(settings)
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        provider = GoogleCalendarProvider(
+            http_client,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
+        try:
+            meeting = await meeting_service.confirm_meeting(
+                session,
+                provider,
+                cipher,
+                team_id=team_id,
+                meeting_id=meeting_id,
+                title="Meeting",
+            )
+        except meeting_service.MeetingConfirmationError as exc:
+            return _ephemeral(str(exc))
+    await session.commit()
+
+    return _ephemeral(f"Booked for {meeting.proposed_start_utc.isoformat()} UTC.")
+
+
 async def _handle_meet_command(session: AsyncSession, form) -> dict:
     text = str(form.get("text", "")).strip()
     team_id = str(form.get("team_id", ""))
     organiser_id = str(form.get("user_id", ""))
+
+    if text.startswith("book "):
+        return await _handle_meet_book(session, team_id, text.removeprefix("book ").strip())
 
     try:
         participants, duration_minutes, window_start, window_end = parse_meet_command(text)
@@ -141,7 +179,7 @@ async def _handle_meet_command(session: AsyncSession, form) -> dict:
 
     return _ephemeral(
         f"Earliest mutual slot: {result.slot_start_utc.isoformat()} UTC, "
-        f"{duration_minutes} min. Meeting id {result.meeting.id} (not booked yet).{note}"
+        f"{duration_minutes} min. Run `/meet book {result.meeting.id}` to book it.{note}"
     )
 
 

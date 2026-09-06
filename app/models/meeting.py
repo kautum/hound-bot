@@ -30,6 +30,10 @@ class Meeting(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
+    # Persisted so a later "book this" action can retrieve the slot without
+    # re-running the whole availability search — without this, propose and
+    # book would need to happen in the same request, which they don't.
+    proposed_start_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MeetingParticipant(Base):

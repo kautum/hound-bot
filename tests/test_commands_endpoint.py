@@ -196,3 +196,85 @@ class TestMeetCommand:
         text = response.json()["text"]
         assert "Earliest mutual slot" in text
         assert "2026-09-07T09:00:00+00:00" in text
+
+    async def test_propose_then_book_end_to_end(self, api_client, db_session, monkeypatch):
+        import httpx
+        import respx
+        from cryptography.fernet import Fernet
+
+        from app.calendar.google_calendar import (
+            GOOGLE_EVENTS_URL,
+            GOOGLE_FREEBUSY_URL,
+            GOOGLE_TOKEN_URL,
+        )
+        from app.core.security import TokenCipher
+        from app.models import User
+
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_secret", "gsecret")
+        key = Fernet.generate_key().decode()
+        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key", key)
+        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key_version", 1)
+
+        await _make_workspace(db_session, "T1")
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        token_enc, version = cipher.encrypt("tok-alice")
+        db_session.add(
+            User(
+                slack_user_id="U1",
+                team_id="T1",
+                tz="UTC",
+                google_refresh_token_enc=token_enc,
+                key_version=version,
+                google_email="a@x.com",
+            )
+        )
+        await db_session.commit()
+
+        with respx.mock:
+            respx.post(GOOGLE_TOKEN_URL).mock(
+                return_value=httpx.Response(200, json={"access_token": "ya29.fake"})
+            )
+            respx.post(GOOGLE_FREEBUSY_URL).mock(
+                return_value=httpx.Response(200, json={"calendars": {"primary": {"busy": []}}})
+            )
+
+            propose_body = _form_body(
+                command="/meet",
+                text="<@U1> 30 | 2026-09-07T09:00:00+00:00 | 2026-09-07T17:00:00+00:00",
+                team_id="T1",
+                user_id="U1",
+            )
+            propose_response = await api_client.post(
+                "/slack/commands",
+                content=propose_body,
+                headers=_signed_form_headers(propose_body, SIGNING_SECRET),
+            )
+            meeting_id = propose_response.json()["text"].split("/meet book ")[1].split("`")[0]
+
+            respx.post(GOOGLE_EVENTS_URL).mock(
+                return_value=httpx.Response(200, json={"id": "evt_end_to_end"})
+            )
+
+            book_body = _form_body(
+                command="/meet", text=f"book {meeting_id}", team_id="T1", user_id="U1"
+            )
+            book_response = await api_client.post(
+                "/slack/commands",
+                content=book_body,
+                headers=_signed_form_headers(book_body, SIGNING_SECRET),
+            )
+
+        assert "Booked for" in book_response.json()["text"]
+
+        import uuid
+
+        from sqlalchemy import select
+
+        from app.models.meeting import STATUS_BOOKED, Meeting
+
+        result = await db_session.execute(select(Meeting).filter_by(id=uuid.UUID(meeting_id)))
+        meeting = result.scalar_one()
+        assert meeting.status == STATUS_BOOKED
+        assert meeting.google_event_id == "evt_end_to_end"

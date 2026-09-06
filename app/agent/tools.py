@@ -99,7 +99,7 @@ async def _handle_propose_meeting(ctx: AgentContext, args: ProposeMeetingArgs) -
 
     return (
         f"Proposed {args.duration_minutes} min at {result.slot_start_utc.isoformat()} UTC"
-        f"{note}. Meeting id {result.meeting.id} — not booked yet, confirm to book it."
+        f"{note}. Not booked yet — run `/meet book {result.meeting.id}` to confirm it."
     )
 
 

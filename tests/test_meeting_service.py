@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from cryptography.fernet import Fernet
 
 from app.calendar.provider import BusyBlock, InvalidGrantError
@@ -234,3 +235,112 @@ class TestBookMeeting:
 
         assert booked.status == STATUS_BOOKED
         assert provider.created_events[0]["attendees"] == ["a@x.com"]
+
+
+class TestConfirmMeeting:
+    async def test_books_using_the_persisted_proposed_slot(self, db_session):
+        """The gap this closes: propose_meeting's slot must be retrievable
+        later without re-running the availability search."""
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await _make_linked_user(
+            db_session, cipher, "U_BOB", "team-A", "UTC", "tok-bob", "b@x.com"
+        )
+        await db_session.commit()
+
+        provider = FakeProvider(busy_by_token={})
+        proposal = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=["U_BOB"],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+        await db_session.commit()
+        assert proposal.meeting is not None
+        assert proposal.meeting.proposed_start_utc == proposal.slot_start_utc
+
+        from app.services.meeting_service import confirm_meeting
+
+        booked = await confirm_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            meeting_id=proposal.meeting.id,
+            title="Sync",
+        )
+
+        assert booked.google_event_id == "evt_999"
+        # Both linked participants, including the non-organiser, get invited.
+        assert sorted(provider.created_events[0]["attendees"]) == ["a@x.com", "b@x.com"]
+
+    async def test_rejects_booking_an_unknown_meeting(self, db_session):
+        import uuid
+
+        from app.services.meeting_service import MeetingConfirmationError, confirm_meeting
+
+        provider = FakeProvider(busy_by_token={})
+        cipher = TokenCipher(keys={1: Fernet.generate_key().decode()}, current_version=1)
+        with pytest.raises(MeetingConfirmationError, match="No meeting"):
+            await confirm_meeting(
+                db_session,
+                provider,
+                cipher,
+                team_id="team-A",
+                meeting_id=uuid.uuid4(),
+                title="Sync",
+            )
+
+    async def test_rejects_booking_an_already_booked_meeting(self, db_session):
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await db_session.commit()
+
+        provider = FakeProvider(busy_by_token={})
+        proposal = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=[],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+        await db_session.commit()
+
+        from app.services.meeting_service import MeetingConfirmationError, confirm_meeting
+
+        await confirm_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            meeting_id=proposal.meeting.id,
+            title="Sync",
+        )
+        await db_session.commit()
+
+        with pytest.raises(MeetingConfirmationError, match="already booked"):
+            await confirm_meeting(
+                db_session,
+                provider,
+                cipher,
+                team_id="team-A",
+                meeting_id=proposal.meeting.id,
+                title="Sync",
+            )

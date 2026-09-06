@@ -5,16 +5,24 @@ from the availability constraint, not treated as a hard error, and reported
 back so the caller can prompt them to link.
 """
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.calendar.intersection import find_earliest_slot
 from app.calendar.provider import CalendarProvider, InvalidGrantError
 from app.core.security import TokenCipher
-from app.models.meeting import STATUS_BOOKED, Meeting
+from app.models.meeting import STATUS_BOOKED, STATUS_PROPOSED, Meeting, MeetingParticipant
 from app.repositories.user_repository import UserRepository
+
+
+class MeetingConfirmationError(Exception):
+    """A proposed meeting can't be booked as requested — not found, not in
+    `proposed` status, or the organiser hasn't linked a calendar to book
+    through. Never silently books something else instead."""
 
 
 @dataclass
@@ -91,11 +99,10 @@ async def propose_meeting(
         team_id=team_id,
         organiser_slack_id=organiser_slack_id,
         duration_min=int(duration.total_seconds() // 60),
+        proposed_start_utc=slot_start,
     )
     session.add(meeting)
     await session.flush()
-
-    from app.models.meeting import MeetingParticipant
 
     for slack_user_id in all_participants:
         session.add(
@@ -131,3 +138,58 @@ async def book_meeting(
     meeting.google_event_id = event_id
     await session.flush()
     return meeting
+
+
+async def confirm_meeting(
+    session: AsyncSession,
+    provider: CalendarProvider,
+    cipher: TokenCipher,
+    *,
+    team_id: str,
+    meeting_id: uuid.UUID,
+    title: str,
+) -> Meeting:
+    """The path a slash command or agent tool actually calls to turn a
+    proposed slot into a real calendar event, using the slot persisted by
+    propose_meeting rather than re-running the availability search (which
+    could legitimately return a different answer by the time this runs)."""
+    result = await session.execute(select(Meeting).filter_by(id=meeting_id, team_id=team_id))
+    meeting = result.scalar_one_or_none()
+    if meeting is None:
+        raise MeetingConfirmationError("No meeting with that id in this workspace.")
+    if meeting.status != STATUS_PROPOSED:
+        raise MeetingConfirmationError(f"Meeting is already {meeting.status}.")
+    if meeting.proposed_start_utc is None:
+        raise MeetingConfirmationError("Meeting has no proposed time to book.")
+
+    users = UserRepository(session)
+    organiser = await users.get(meeting.organiser_slack_id)
+    if (
+        organiser is None
+        or organiser.google_refresh_token_enc is None
+        or organiser.google_link_broken_at
+    ):
+        raise MeetingConfirmationError("The organiser must link a calendar before booking.")
+    organiser_refresh_token = cipher.decrypt(
+        organiser.google_refresh_token_enc, organiser.key_version
+    )
+
+    participants_result = await session.execute(
+        select(MeetingParticipant).filter_by(meeting_id=meeting_id)
+    )
+    attendee_emails = []
+    for row in participants_result.scalars().all():
+        participant = await users.get(row.slack_user_id)
+        if participant is not None and participant.google_email:
+            attendee_emails.append(participant.google_email)
+
+    return await book_meeting(
+        session,
+        provider,
+        cipher,
+        meeting=meeting,
+        slot_start_utc=meeting.proposed_start_utc,
+        organiser_refresh_token=organiser_refresh_token,
+        attendee_emails=attendee_emails,
+        title=title,
+    )
