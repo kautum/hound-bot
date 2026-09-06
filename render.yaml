@@ -1,0 +1,33 @@
+# Render Blueprint — see ARCHITECTURE.md's stack section for why: exactly
+# one free web service, ever (750 instance-hours/month per workspace, shared
+# across every free service on the account — a 6-hour margin on a 31-day
+# month). Do not add a second service here for "staging" or similar.
+services:
+  - type: web
+    name: slack-workplace-assistant
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false # Supabase pooler URL (port 6543) — set manually, never committed
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: SLACK_CLIENT_ID
+        sync: false
+      - key: SLACK_CLIENT_SECRET
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: ENCRYPTION_KEY_VERSION
+        value: "1"
+      - key: CRON_SHARED_SECRET
+        sync: false
