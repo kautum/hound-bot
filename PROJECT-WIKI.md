@@ -7,7 +7,57 @@ this file is the *operational* companion: what's actually done, what's a known t
 to use Devin correctly). The full plan with every decision's reasoning is at
 `~/.claude/plans/alright-now-lets-glistening-yeti.md`.
 
-**Last updated:** 2026-09-06, end of the session that built Phases 1–7.
+**Last updated:** 2026-09-07, mid live account provisioning (after the build session).
+
+---
+
+## 0. Where we actually are right now — read this first if resuming
+
+**Code is done (see §1). Since then, this session moved into live account provisioning** —
+getting real Slack/Google/Groq/ngrok credentials so the built code can actually run. This
+section goes stale fast; trust `.env`'s actual contents over this table if they conflict.
+
+**All in `.env` already** (git-ignored, never committed): `PUBLIC_BASE_URL` (a real ngrok
+domain), `SLACK_CLIENT_ID`/`SECRET`/`SIGNING_SECRET` (real), `GOOGLE_CLIENT_ID`/`SECRET`
+(real), `GROQ_API_KEY` (real), `ENCRYPTION_KEY` and `CRON_SHARED_SECRET` (generated locally,
+need no external account).
+
+**Slack app — fully confirmed working.** Bot scopes, redirect URL, slash commands (`/task`,
+`/meet`, `/link-calendar`), and event subscriptions (`app_mention`) were all set in one shot
+via an **App Manifest** pasted into "Create an App → From an app manifest" — far more reliable
+than clicking through OAuth & Permissions / Slash Commands / Event Subscriptions as separate
+pages, which is where manual navigation got stuck originally. **If a new Slack app is ever
+needed, use a manifest again, not manual clicking** — reconstruct the YAML from
+`ARCHITECTURE.md`'s scope list and this repo's actual route paths (`/slack/commands`,
+`/slack/events`, `/slack/oauth/callback`) if the original isn't in scrollback anymore.
+
+**Google — one thing left unconfirmed.** Google Cloud Console has restructured what used to be
+a single "OAuth consent screen" page into a "Google Auth Platform" section with separate
+**Branding / Audience / Data Access / Clients** pages. A working Client ID + Secret were
+obtained, but **whether the Calendar scopes (`calendar.freebusy`, `calendar.events`) are
+actually present under "Data Access", and whether "Audience" has User Type = External with
+test users added, was never independently confirmed** — getting a Client ID doesn't prove
+those were set, given the new page structure. **Check this before assuming Google OAuth will
+work end to end**, and before spending time debugging what might just be a missing scope.
+
+**Local machine state, checked directly via Bash this session — not guessed:**
+- Docker: **not installed/running** — `make db-up` as written won't work here
+- A Postgres server **is already running on port 5432** (from an unrelated earlier project on
+  this machine) — `.env.example`'s default `DATABASE_URL` will likely work against it
+  directly; just create a `slack_workplace_assistant` database in it
+- ngrok: authenticated, but **not currently running** — needs `ngrok http 8000` started before
+  anything Slack/Google sends will actually reach this machine
+- Nothing is listening on port 8000 — **the app itself has never been started.** Every "Done,
+  tested" claim in §1 is true against mocked externals and a throwaway test Postgres; nothing
+  has round-tripped through the real internet yet.
+
+**Immediate next steps, in order, once resumed:**
+1. Confirm Google's Data Access + Audience pages (the one unresolved item above)
+2. Create the `slack_workplace_assistant` database in the existing port-5432 Postgres
+3. `alembic upgrade head`
+4. Start the app (`uvicorn app.main:app --reload`) and `ngrok http 8000` (background)
+5. Visit `https://<the ngrok url>/slack/install` — the actual first live install, and the
+   first moment any of this has touched the real internet
 
 ---
 
