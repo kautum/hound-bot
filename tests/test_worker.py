@@ -266,7 +266,17 @@ class TestHandleMeetPropose:
             },
         )
         cipher = TokenCipher(keys={1: Fernet.generate_key().decode()}, current_version=1)
-        await handle_meet_propose(db_session, job, cipher)  # must not raise
+
+        with respx.mock(assert_all_called=False) as mock_router:
+            # No routes registered — the real gap this test guards is that
+            # _respond's `if not response_url: return` guard actually fires
+            # before any HTTP call is attempted. Without that guard, an
+            # empty response_url passed straight to httpx.post would raise
+            # (invalid URL), which is exactly the crash this test's name
+            # claims doesn't happen — but the old body never checked that a
+            # crash was even possible in the first place.
+            await handle_meet_propose(db_session, job, cipher)
+            assert len(mock_router.calls) == 0
 
 
 class TestWorkerSupervision:

@@ -92,7 +92,7 @@ class TestSlackEventsEndpoint:
         assert len(jobs) == 1
 
     async def test_unhandled_event_type_is_acked_but_not_enqueued(
-        self, api_client, monkeypatch
+        self, api_client, db_session, monkeypatch
     ):
         monkeypatch.setattr("app.api.routes_events.settings.slack_signing_secret", SIGNING_SECRET)
         body = json.dumps(
@@ -108,3 +108,12 @@ class TestSlackEventsEndpoint:
             "/slack/events", content=body, headers=_signed_headers(body, SIGNING_SECRET)
         )
         assert response.status_code == 200
+
+        # Verify no job was enqueued for the unhandled event type
+        from sqlalchemy import select
+
+        from app.models import InboundJob
+
+        result = await db_session.execute(select(InboundJob).filter_by(team_id="T99999"))
+        jobs = result.scalars().all()
+        assert len(jobs) == 0

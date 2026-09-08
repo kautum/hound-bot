@@ -129,6 +129,15 @@ class TestRunAgentTurn:
 
         assert "delete_all_tasks" not in TOOLS
 
+        # Verify the database was not modified by the injection attempt
+        from sqlalchemy import select
+
+        from app.models import Task
+
+        result = await db_session.execute(select(Task).filter_by(team_id="team-A"))
+        tasks = result.scalars().all()
+        assert len(tasks) == 0
+
     @respx.mock
     async def test_malformed_tool_arguments_are_handled_without_crashing(self, db_session):
         await _make_workspace(db_session, "team-A")

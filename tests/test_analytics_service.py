@@ -131,6 +131,50 @@ class TestBuildWeeklyDigest:
     async def test_produces_a_readable_summary(self, db_session):
         await _make_workspace(db_session, "team-A")
         text = await build_weekly_digest(db_session, "team-A")
-        assert "Task completion rate" in text
-        assert "Overdue tasks" in text
-        assert "Meetings this week" in text
+        assert "Task completion rate: 100%" in text
+        assert "Overdue tasks: 0" in text
+        assert "Meetings this week: 0" in text
+
+    async def test_reflects_actual_numeric_values_not_just_labels(self, db_session):
+        """The original version of this test only checked label substrings
+        were present — a digest showing another tenant's numbers, or the
+        wrong numbers entirely, would still have passed. This asserts the
+        real computed values, so a broken rate/count/meeting calculation
+        would actually fail it."""
+        await _make_workspace(db_session, "team-A")
+        due = datetime.now(UTC) + timedelta(days=1)
+
+        done_task = await create_task(
+            db_session,
+            team_id="team-A",
+            creator_slack_id="U1",
+            assignee_slack_id="U1",
+            title="Done one",
+            due_at_utc=due,
+            channel_id="C1",
+        )
+        await db_session.commit()
+        await mark_task_done(
+            db_session, team_id="team-A", task_id=done_task.id, requesting_slack_user_id="U1"
+        )
+        await db_session.commit()
+
+        overdue_due = datetime.now(UTC) - timedelta(days=1)
+        await create_task(
+            db_session,
+            team_id="team-A",
+            creator_slack_id="U1",
+            assignee_slack_id="U1",
+            title="Overdue one",
+            due_at_utc=overdue_due,
+            channel_id="C1",
+        )
+        db_session.add(Meeting(team_id="team-A", organiser_slack_id="U1", duration_min=30))
+        await db_session.commit()
+
+        text = await build_weekly_digest(db_session, "team-A")
+
+        # 1 of 2 tasks done in the window -> 50%
+        assert "Task completion rate: 50%" in text
+        assert "Overdue tasks: 1" in text
+        assert "Meetings this week: 1" in text
