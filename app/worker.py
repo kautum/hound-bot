@@ -6,6 +6,7 @@ results back to Slack. See ARCHITECTURE.md's system shape — this is what
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
@@ -150,9 +151,53 @@ async def handle_meet_propose(
     )
 
 
+async def handle_meet_book(session: AsyncSession, job: InboundJob, cipher: TokenCipher) -> None:
+    """Booking makes two sequential Google calls (refresh, then
+    events.insert) — the same reason meet_propose is enqueued rather than
+    run inline. This used to run inside the slash-command handler itself
+    (S5), the exact bug meet_propose was already fixed for."""
+    payload = job.payload
+    response_url = payload.get("response_url", "")
+
+    async def _respond(text: str) -> None:
+        if not response_url:
+            logger.warning("meet_book job %s has no response_url to reply to", job.id)
+            return
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(response_url, json={"response_type": "ephemeral", "text": text})
+
+    if not (settings.google_client_id and settings.google_client_secret):
+        await _respond("Calendar scheduling isn't configured on this workspace yet.")
+        return
+
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        provider = GoogleCalendarProvider(
+            http_client,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
+        try:
+            meeting = await meeting_service.confirm_meeting(
+                session,
+                provider,
+                cipher,
+                team_id=job.team_id,
+                meeting_id=uuid.UUID(payload["meeting_id"]),
+                requesting_slack_user_id=payload["requesting_user_id"],
+                title="Meeting",
+            )
+        except meeting_service.MeetingConfirmationError as exc:
+            await _respond(str(exc))
+            return
+
+    await session.commit()
+    await _respond(f"Booked for {meeting.proposed_start_utc.isoformat()} UTC.")
+
+
 HANDLERS: dict[str, Callable[[AsyncSession, InboundJob, TokenCipher], Awaitable[None]]] = {
     "app_mention": handle_app_mention,
     "meet_propose": handle_meet_propose,
+    "meet_book": handle_meet_book,
 }
 
 

@@ -149,6 +149,51 @@ class TestMeetCommand:
         )
         assert "Usage" in response.json()["text"]
 
+    async def test_book_performs_no_outbound_calls_and_enqueues_one_job(
+        self, api_client, db_session, monkeypatch
+    ):
+        """S5's gate exactly as specified: /meet book must make zero
+        outbound HTTP calls inside the request handler, and enqueue exactly
+        one job for the worker to process instead."""
+        import respx
+
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_secret", "gsecret")
+        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key", "irrelevant-here")
+        await _make_workspace(db_session, "T1")
+
+        meeting_id = "11111111-1111-1111-1111-111111111111"
+
+        with respx.mock(assert_all_called=False) as mock_router:
+            # No routes registered at all — any outbound call raises inside
+            # respx, which is exactly the assertion: zero network calls.
+            body = _form_body(
+                command="/meet",
+                text=f"book {meeting_id}",
+                team_id="T1",
+                user_id="U1",
+                response_url="https://hooks.slack.invalid/commands/fake",
+            )
+            response = await api_client.post(
+                "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+            )
+            assert len(mock_router.calls) == 0
+
+        assert "Booking that meeting" in response.json()["text"]
+
+        from sqlalchemy import select
+
+        from app.models import InboundJob
+
+        result = await db_session.execute(
+            select(InboundJob).filter_by(team_id="T1", event_type="meet_book")
+        )
+        jobs = result.scalars().all()
+        assert len(jobs) == 1
+        assert jobs[0].payload["meeting_id"] == meeting_id
+        assert jobs[0].payload["requesting_user_id"] == "U1"
+
     async def test_degrades_gracefully_when_calendar_not_configured(self, api_client, monkeypatch):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
         monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", None)
@@ -291,7 +336,11 @@ class TestMeetCommand:
             )
 
             book_body = _form_body(
-                command="/meet", text=f"book {meeting_id}", team_id="T1", user_id="U1"
+                command="/meet",
+                text=f"book {meeting_id}",
+                team_id="T1",
+                user_id="U1",
+                response_url=response_url,
             )
             book_response = await api_client.post(
                 "/slack/commands",
@@ -299,7 +348,22 @@ class TestMeetCommand:
                 headers=_signed_form_headers(book_body, SIGNING_SECRET),
             )
 
-        assert "Booked for" in book_response.json()["text"]
+            # S5: booking must ack-and-enqueue too, exactly like propose —
+            # the two Google calls (refresh, events.insert) happen in the
+            # worker, never inline in the command handler.
+            assert "Booking that meeting" in book_response.json()["text"]
+
+            from app.worker import handle_meet_book
+
+            book_job_result = await db_session.execute(
+                sa_select(InboundJob).filter_by(team_id="T1", event_type="meet_book")
+            )
+            book_job = book_job_result.scalars().one()
+            await handle_meet_book(db_session, book_job, cipher)
+
+            booked_text = json.loads(response_url_route.calls.last.request.content)["text"]
+
+        assert "Booked for" in booked_text
 
         import uuid
 

@@ -1,24 +1,24 @@
-"""Slash commands. All fast, deterministic paths — no LLM, no ack-and-enqueue
-needed, since these operations are quick enough to answer inline within
-Slack's 3-second budget. See ARCHITECTURE.md's tools-first section. Slack
-lets multiple slash commands share one request URL, dispatched by the
-`command` field — that's what this router does first.
+"""Slash commands. Only genuinely fast, deterministic paths answer inline
+within Slack's 3-second budget — anything that makes an outbound network
+call (a Google token refresh, an events.insert) is enqueued instead and
+answered later via `response_url`, the same ack-and-enqueue shape
+/slack/events uses. See ARCHITECTURE.md's tools-first section and its
+3-second rule. Slack lets multiple slash commands share one request URL,
+dispatched by the `command` field — that's what this router does first.
 """
 
 import uuid
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes_google import PURPOSE_GOOGLE_LINK
-from app.calendar.google_calendar import GoogleCalendarProvider
 from app.core.config import settings
 from app.core.db import get_session
-from app.core.security import token_cipher_from_settings, verify_slack_signature
+from app.core.security import verify_slack_signature
 from app.repositories.inbound_job_repository import InboundJobRepository
 from app.repositories.oauth_state_repository import OAuthStateRepository
-from app.services import meeting_service, task_service
+from app.services import task_service
 from app.services.meet_command_parser import MeetCommandError, parse_meet_command
 from app.services.task_command_parser import TaskCommandError, parse_task_add
 
@@ -115,7 +115,7 @@ async def _handle_link_calendar_command(session: AsyncSession, form) -> dict:
 
 
 async def _handle_meet_book(
-    session: AsyncSession, team_id: str, requesting_user_id: str, raw_id: str
+    session: AsyncSession, team_id: str, requesting_user_id: str, raw_id: str, response_url: str
 ) -> dict:
     try:
         meeting_id = uuid.UUID(raw_id)
@@ -128,28 +128,24 @@ async def _handle_meet_book(
     if not calendar_configured:
         return _ephemeral("Calendar scheduling isn't configured on this workspace yet.")
 
-    cipher = token_cipher_from_settings(settings)
-    async with httpx.AsyncClient(timeout=10.0) as http_client:
-        provider = GoogleCalendarProvider(
-            http_client,
-            client_id=settings.google_client_id,
-            client_secret=settings.google_client_secret,
-        )
-        try:
-            meeting = await meeting_service.confirm_meeting(
-                session,
-                provider,
-                cipher,
-                team_id=team_id,
-                meeting_id=meeting_id,
-                requesting_slack_user_id=requesting_user_id,
-                title="Meeting",
-            )
-        except meeting_service.MeetingConfirmationError as exc:
-            return _ephemeral(str(exc))
+    # Booking makes two sequential Google calls (token refresh, then
+    # events.insert), each with its own timeout — together comfortably over
+    # Slack's 3-second ack budget. See S5: this used to run inline right
+    # here, the identical bug /meet propose was already fixed for. Same
+    # ack-and-enqueue shape as propose: reply now, post the result to
+    # response_url once the worker's done.
+    await InboundJobRepository(session).enqueue(
+        team_id=team_id,
+        event_type="meet_book",
+        payload={
+            "meeting_id": str(meeting_id),
+            "requesting_user_id": requesting_user_id,
+            "response_url": response_url,
+        },
+    )
     await session.commit()
 
-    return _ephemeral(f"Booked for {meeting.proposed_start_utc.isoformat()} UTC.")
+    return _ephemeral("Booking that meeting — I'll follow up here shortly.")
 
 
 async def _handle_meet_command(session: AsyncSession, form) -> dict:
@@ -160,7 +156,7 @@ async def _handle_meet_command(session: AsyncSession, form) -> dict:
 
     if text.startswith("book "):
         return await _handle_meet_book(
-            session, team_id, organiser_id, text.removeprefix("book ").strip()
+            session, team_id, organiser_id, text.removeprefix("book ").strip(), response_url
         )
 
     try:
