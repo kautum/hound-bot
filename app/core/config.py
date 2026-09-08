@@ -5,6 +5,11 @@ are validated where they're used (e.g. security.py raises if ENCRYPTION_KEY is
 missing when encryption is actually attempted), not eagerly at import time —
 that would break `pytest` for anyone who hasn't configured Slack/Google/Groq
 yet but wants to run the unit tests that don't need them.
+
+`database_url` is the one exception to "no hardcoded default" that actually
+matters: it used to default to a role/db that doesn't exist on every machine,
+which fails as a confusing asyncpg connection error deep in a fixture instead
+of a clear message at startup. Now a missing DATABASE_URL fails loudly.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,7 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/slack_workplace_assistant"
+    database_url: str
 
     # The dev ngrok tunnel URL locally, the Render URL in prod. See
     # ARCHITECTURE.md — dev and prod are separate Slack apps with separate
