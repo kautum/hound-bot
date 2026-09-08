@@ -36,6 +36,11 @@ class Settings(BaseSettings):
 
     encryption_key: str | None = None
     encryption_key_version: int = 1
+    # S6: set both during a key rotation window so rows still encrypted
+    # under the old key keep decrypting while everything new (and every
+    # re-encrypt) uses encryption_key. Unset once the rotation is complete.
+    encryption_key_old: str | None = None
+    encryption_key_old_version: int | None = None
 
     cron_shared_secret: str | None = None
 

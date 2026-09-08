@@ -13,13 +13,14 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # The URL is resolved here, in Python, and never round-tripped through
-# ConfigParser (config.set_main_option / config.get_section both go through
-# it). ConfigParser performs %-interpolation, which corrupts any password
-# containing a URL-encoded character such as %40 or %23 — exactly what a
-# generated Supabase password looks like. A caller (e.g. a test) may already
-# have called config.set_main_option("sqlalchemy.url", ...) to point at a
-# scratch database; that takes precedence over the app's own settings.
-db_url = config.get_main_option("sqlalchemy.url") or settings.database_url
+# ConfigParser (set_main_option/get_main_option/get_section all go through
+# it). ConfigParser performs %-interpolation — verified experimentally, not
+# assumed: config.set_main_option() itself raises ValueError on a URL
+# containing "%40", before the value is ever read back. Exactly what a
+# generated Supabase password looks like. A caller (e.g. a test) may have
+# set config.attributes["sqlalchemy.url"] — a plain dict, no ConfigParser
+# involved — to point at a scratch database; that takes precedence.
+db_url = config.attributes.get("sqlalchemy.url") or settings.database_url
 target_metadata = Base.metadata
 
 

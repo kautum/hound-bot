@@ -16,6 +16,14 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from app.core.config import Settings
 
+# S6: token_cipher_from_settings used to build a single-entry key map from
+# the one ENCRYPTION_KEY in config — rotating the key would make every
+# existing row unreadable (no key available for the old key_version).
+# ENCRYPTION_KEY_OLD/_VERSION, when present, keep the previous key available
+# for decryption while ENCRYPTION_KEY becomes the new key everything encrypts
+# with going forward — the standard "add new, keep old, re-encrypt
+# gradually, drop old" rotation shape TokenCipher was already built for.
+
 SLACK_SIGNATURE_VERSION = "v0"
 REPLAY_WINDOW_SECONDS = 5 * 60
 
@@ -88,7 +96,10 @@ class TokenCipher:
 def token_cipher_from_settings(settings: Settings) -> TokenCipher:
     if not settings.encryption_key:
         raise RuntimeError("ENCRYPTION_KEY is not configured")
+    keys = {settings.encryption_key_version: settings.encryption_key}
+    if settings.encryption_key_old and settings.encryption_key_old_version is not None:
+        keys[settings.encryption_key_old_version] = settings.encryption_key_old
     return TokenCipher(
-        keys={settings.encryption_key_version: settings.encryption_key},
+        keys=keys,
         current_version=settings.encryption_key_version,
     )
