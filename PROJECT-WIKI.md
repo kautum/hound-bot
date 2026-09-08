@@ -7,7 +7,50 @@ this file is the *operational* companion: what's actually done, what's a known t
 to use Devin correctly). The full plan with every decision's reasoning is at
 `~/.claude/plans/alright-now-lets-glistening-yeti.md`.
 
-**Last updated:** 2026-09-07, mid live account provisioning (after the build session).
+**Last updated:** 2026-09-08, after an overnight autonomous fix-and-test run.
+
+---
+
+## -1. Tonight's run — read this if it's the morning after 2026-09-08
+
+Two adversarial audits found 4 blockers and 12 real defects (2 critical security holes)
+hiding behind the "112 tests passing" claim. Full plan and evidence:
+`~/.claude/plans/alright-now-lets-glistening-yeti.md`, section "TONIGHT'S RUN". Short version:
+
+**Fixed and tested tonight (138 tests passing, up from 112, against real Postgres):**
+- Dev environment made runnable on this machine's native Postgres (no Docker, role
+  `kpkautum` not `postgres`) — see `.env` and `Makefile`.
+- A real migration/model drift test (`tests/test_migrations_match_models.py`), which
+  immediately found and let us fix a real bug: `alembic/env.py` was ignoring any
+  caller-supplied database URL.
+- **S1** (critical): `/google/link` took a Slack identity as a plain query param —
+  anyone could bind their own Google account to someone else's Slack identity. Fixed:
+  identity never travels in a URL now; only an opaque, server-issued state token does.
+- **S2** (critical): `UserRepository` had no tenant scoping at all, and `users`' primary
+  key was `slack_user_id` alone — which is only unique *within* a workspace, not
+  globally. Fixed with a schema migration to a composite `(team_id, slack_user_id)` key.
+- **S3/S4**: completed tasks kept sending reminders forever; `/task done` had no
+  authorization check at all. Both fixed.
+- **S5**: `/meet book` ran two blocking Google API calls inline in the slash-command
+  handler, over Slack's 3-second budget. Now ack-and-enqueue, like `/meet propose`.
+- **S6/S7/S8/S9/S10**: key rotation support, worker crash supervision + real `/health`
+  liveness, job/reminder claim-lock races under concurrent workers, Supabase pooler
+  compatibility, and a URL-encoding crash in Alembic — all fixed with tests.
+- Five tests that passed for the wrong reason (asserted too little to catch a real
+  regression) were rewritten — four by Devin, one directly, after a time-budget cutoff.
+- `LIVE-FIRE.md` — our Slack HMAC implementation cross-validated in both directions
+  against `slack_sdk`'s own independent `SignatureVerifier`.
+
+**Not done tonight, deliberately** (see the plan's "Nothing is asked of you before you
+sleep" section): the real ngrok round trip, a real Groq call, a real Slack post,
+GitHub repo + CI (Unit 9), and S11/S12 (analytics wiring, uninstall handling — Unit 10).
+None of these need a login you haven't already provided except the three in the plan's
+morning checklist (Slack install, `/link-calendar` consent, Render/Supabase/cron signups).
+
+**Devin spend tonight:** one load-test task (committed), and 4/5 of a test-repair task
+(the 5th finished by hand after a hard time cutoff — see the commit for what happened).
+GPT-6 Astra was tried once and rejected instantly ("Upgrade to Pro") — not available on
+this account; the default model was used instead.
 
 ---
 
