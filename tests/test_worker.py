@@ -267,3 +267,72 @@ class TestHandleMeetPropose:
         )
         cipher = TokenCipher(keys={1: Fernet.generate_key().decode()}, current_version=1)
         await handle_meet_propose(db_session, job, cipher)  # must not raise
+
+
+class TestWorkerSupervision:
+    """S7: the worker loop used to have no supervision — one raised
+    exception from process_one_batch ended it permanently, silently, with
+    /health none the wiser."""
+
+    async def test_worker_is_alive_false_before_any_poll(self):
+        import app.worker as worker_module
+
+        worker_module._last_poll_completed_utc = None
+        assert worker_module.worker_is_alive() is False
+
+    async def test_worker_is_alive_true_after_a_recent_poll(self):
+        import app.worker as worker_module
+
+        worker_module._last_poll_completed_utc = datetime.now(UTC)
+        assert worker_module.worker_is_alive() is True
+
+    async def test_worker_is_alive_false_once_stale(self):
+        from datetime import timedelta
+
+        import app.worker as worker_module
+
+        worker_module._last_poll_completed_utc = datetime.now(UTC) - timedelta(
+            seconds=worker_module.STALE_AFTER_SECONDS + 1
+        )
+        assert worker_module.worker_is_alive() is False
+
+    async def test_loop_survives_a_failing_iteration_and_keeps_polling(self, monkeypatch):
+        """Reproduces S7 directly: process_one_batch raises on the first
+        call. The old code let that exception end the while loop forever;
+        the fix must catch it, record a poll timestamp anyway, and continue
+        to a second iteration."""
+        import asyncio
+
+        import app.worker as worker_module
+
+        worker_module._last_poll_completed_utc = None
+        call_count = 0
+
+        async def _flaky_process_one_batch(session, cipher):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated DB blip")
+            raise asyncio.CancelledError()  # stop the loop cleanly after iteration 2
+
+        monkeypatch.setattr(worker_module, "process_one_batch", _flaky_process_one_batch)
+        monkeypatch.setattr(worker_module, "token_cipher_from_settings", lambda settings: object())
+        monkeypatch.setattr(worker_module, "POLL_INTERVAL_SECONDS", 0)
+
+        class _FakeSession:
+            async def __aenter__(self):
+                return object()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(worker_module, "async_session_factory", lambda: _FakeSession())
+
+        try:
+            await worker_module.run_worker_loop()
+        except asyncio.CancelledError:
+            pass
+
+        # Reached iteration 2 despite iteration 1 raising — the loop did not die.
+        assert call_count == 2
+        assert worker_module.worker_is_alive() is True

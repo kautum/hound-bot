@@ -17,6 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base
 
 STATUS_PENDING = "pending"
+STATUS_CLAIMED = "claimed"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 

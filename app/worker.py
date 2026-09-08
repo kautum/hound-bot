@@ -9,7 +9,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +29,25 @@ from app.services import meeting_service
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 2
+# /health considers the worker unhealthy if it hasn't completed a poll cycle
+# in this long — several multiples of POLL_INTERVAL_SECONDS so a single slow
+# batch doesn't flap the health check, but well below "actually stuck".
+STALE_AFTER_SECONDS = 30
+
+# Timestamp of the worker loop's last completed iteration (successful or
+# not — what matters for liveness is that the loop is still turning, not
+# that every batch succeeded). None until the loop has run at least once.
+_last_poll_completed_utc: datetime | None = None
+
+
+def worker_is_alive() -> bool:
+    """S7: /health used to return a static 200 forever, even after the
+    worker task had silently died — a health check that can't go unhealthy
+    is decoration. True only if the loop has completed a poll recently."""
+    if _last_poll_completed_utc is None:
+        return False
+    age = (datetime.now(UTC) - _last_poll_completed_utc).total_seconds()
+    return age < STALE_AFTER_SECONDS
 
 # Strips a leading Slack mention token (`<@U012ABC>` or `<@U012ABC|name>`) —
 # Slack always puts the mentioned bot's own ID at the front of an
@@ -218,8 +237,19 @@ async def process_one_batch(session: AsyncSession, cipher: TokenCipher) -> int:
 
 
 async def run_worker_loop() -> None:
+    """S7: this used to have no supervision at all — one DB blip raised out
+    of the while loop, silently ending the worker for the life of the
+    process, with /health none the wiser. Now a single iteration's failure
+    is logged and the loop continues; only Cancelled/exit propagate."""
+    global _last_poll_completed_utc
     cipher = token_cipher_from_settings(settings)
     while True:
-        async with async_session_factory() as session:
-            await process_one_batch(session, cipher)
+        try:
+            async with async_session_factory() as session:
+                await process_one_batch(session, cipher)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("worker poll iteration failed — continuing")
+        _last_poll_completed_utc = datetime.now(UTC)
         await asyncio.sleep(POLL_INTERVAL_SECONDS)

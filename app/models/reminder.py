@@ -30,4 +30,9 @@ class Reminder(Base):
     team_id: Mapped[str] = mapped_column(ForeignKey("workspaces.team_id"), nullable=False)
     fire_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # S8: without this, the worker's per-job commit ends the claiming
+    # transaction early and releases FOR UPDATE SKIP LOCKED on the rest of
+    # a claimed batch while those rows are still "unsent" — letting a second
+    # worker re-claim and re-send them. See migration 0007.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     escalation_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

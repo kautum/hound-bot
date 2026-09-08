@@ -32,13 +32,25 @@ class ReminderRepository:
     async def claim_due_batch(self, limit: int = 10) -> list[Reminder]:
         stmt = (
             select(Reminder)
-            .where(Reminder.fire_at_utc <= datetime.now(UTC), Reminder.sent_at.is_(None))
+            .where(
+                Reminder.fire_at_utc <= datetime.now(UTC),
+                Reminder.sent_at.is_(None),
+                Reminder.claimed_at.is_(None),
+            )
             .order_by(Reminder.fire_at_utc)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        reminders = list(result.scalars().all())
+        now = datetime.now(UTC)
+        for reminder in reminders:
+            # S8: marked claimed inside this same locking transaction, so a
+            # per-reminder commit later in the batch can't let a second
+            # worker re-claim rows that are still technically "unsent".
+            reminder.claimed_at = now
+        await self._session.flush()
+        return reminders
 
     async def mark_sent(self, reminder_id: uuid.UUID) -> None:
         reminder = await self._session.get(Reminder, reminder_id)

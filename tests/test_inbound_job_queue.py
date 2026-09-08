@@ -62,6 +62,36 @@ class TestInboundJobQueue:
         assert set(first_ids).isdisjoint(second_ids)
         assert len(first_ids) + len(second_ids) == 4
 
+    async def test_claimed_job_is_not_reclaimed_after_a_commit_mid_batch(
+        self, db_session, db_engine
+    ):
+        """S8: claim_batch used to leave status as STATUS_PENDING, so a
+        per-job commit inside the batch (ending the transaction and
+        releasing FOR UPDATE SKIP LOCKED on the rest of it) let a second
+        worker re-claim jobs that were claimed but not yet processed. This
+        reproduces exactly that shape: claim, commit (simulating the
+        worker's per-job commit), then a second worker's claim_batch must
+        not see the same rows."""
+        await _make_workspace(db_session, "team-A")
+        repo = InboundJobRepository(db_session)
+        job_ids = []
+        for i in range(3):
+            job = await repo.enqueue("team-A", "app_mention", {"channel": "C1", "n": i})
+            job_ids.append(job.id)
+        await db_session.commit()
+
+        session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+        async with session_factory() as worker_a_session:
+            claimed_by_a = await InboundJobRepository(worker_a_session).claim_batch(limit=3)
+            await worker_a_session.commit()  # the exact moment S8's lock was released
+
+        async with session_factory() as worker_b_session:
+            claimed_by_b = await InboundJobRepository(worker_b_session).claim_batch(limit=3)
+
+        assert {j.id for j in claimed_by_a} == set(job_ids)
+        assert claimed_by_b == []  # already claimed — must not be re-claimed
+
     async def test_mark_done_and_mark_failed(self, db_session):
         await _make_workspace(db_session, "team-A")
         repo = InboundJobRepository(db_session)

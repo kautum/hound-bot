@@ -13,7 +13,13 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inbound_job import STATUS_DONE, STATUS_FAILED, STATUS_PENDING, InboundJob
+from app.models.inbound_job import (
+    STATUS_CLAIMED,
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    InboundJob,
+)
 
 
 class InboundJobRepository:
@@ -45,6 +51,15 @@ class InboundJobRepository:
         now = datetime.now(UTC)
         for job in jobs:
             job.claimed_at = now
+            # S8: this used to leave status as STATUS_PENDING, so the
+            # worker's per-job commit (ending the transaction and releasing
+            # FOR UPDATE SKIP LOCKED on the rest of the batch) let a second
+            # worker re-claim and re-execute jobs 2..N while they were still
+            # "pending" in name. Setting STATUS_CLAIMED here, inside the same
+            # locking transaction, removes them from claim_batch's WHERE
+            # clause immediately — no migration needed, status is a plain
+            # string column with no enum/check constraint.
+            job.status = STATUS_CLAIMED
         await self._session.flush()
         return jobs
 
