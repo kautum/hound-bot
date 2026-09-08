@@ -8,7 +8,7 @@ included. Unit 4.6 (slot proposal + book-on-click) is what writes the participan
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -38,11 +38,14 @@ class Meeting(Base):
 
 class MeetingParticipant(Base):
     __tablename__ = "meeting_participants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["team_id", "slack_user_id"], ["users.team_id", "users.slack_user_id"]
+        ),
+    )
 
     meeting_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("meetings.id"), primary_key=True
     )
-    slack_user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.slack_user_id"), primary_key=True
-    )
+    slack_user_id: Mapped[str] = mapped_column(primary_key=True)
     team_id: Mapped[str] = mapped_column(ForeignKey("workspaces.team_id"), nullable=False)

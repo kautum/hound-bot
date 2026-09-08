@@ -16,8 +16,13 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = (Index("ix_users_team_id", "team_id"),)
 
+    # Composite primary key: a Slack user ID is unique only within its own
+    # workspace, not globally, so slack_user_id alone cannot be the key —
+    # see migration 0006 and tests/test_tenant_isolation.py.
     slack_user_id: Mapped[str] = mapped_column(primary_key=True)
-    team_id: Mapped[str] = mapped_column(ForeignKey("workspaces.team_id"), nullable=False)
+    team_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.team_id"), primary_key=True, nullable=False
+    )
     tz: Mapped[str] = mapped_column(nullable=False)
     google_refresh_token_enc: Mapped[bytes | None] = mapped_column(LargeBinary)
     key_version: Mapped[int] = mapped_column(Integer, nullable=False)

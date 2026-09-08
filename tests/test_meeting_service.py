@@ -189,7 +189,7 @@ class TestProposeMeeting:
 
         from app.repositories.user_repository import UserRepository
 
-        bob = await UserRepository(db_session).get("U_BOB")
+        bob = await UserRepository(db_session, "team-A").get("U_BOB")
         assert bob.google_link_broken_at is not None
 
 

@@ -11,12 +11,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.routes_google import PURPOSE_GOOGLE_LINK
 from app.calendar.google_calendar import GoogleCalendarProvider
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import token_cipher_from_settings, verify_slack_signature
 from app.repositories.inbound_job_repository import InboundJobRepository
-from app.api.routes_google import PURPOSE_GOOGLE_LINK
 from app.repositories.oauth_state_repository import OAuthStateRepository
 from app.services import meeting_service, task_service
 from app.services.meet_command_parser import MeetCommandError, parse_meet_command

@@ -44,7 +44,7 @@ async def propose_meeting(
     search_window_start_utc: datetime,
     search_window_end_utc: datetime,
 ) -> ProposalResult:
-    users = UserRepository(session)
+    users = UserRepository(session, team_id)
     busy_by_participant = {}
     timezone_by_participant = {}
     unavailable: list[str] = []
@@ -59,7 +59,7 @@ async def propose_meeting(
     # whether or not they've ever linked a calendar — being invited to a
     # meeting is a lighter-weight interaction than linking one.
     for slack_user_id in all_participants:
-        await users.get_or_create(slack_user_id, team_id, tz="UTC")
+        await users.get_or_create(slack_user_id, tz="UTC")
 
     for slack_user_id in all_participants:
         user = await users.get(slack_user_id)
@@ -171,7 +171,7 @@ async def confirm_meeting(
     if meeting.proposed_start_utc is None:
         raise MeetingConfirmationError("Meeting has no proposed time to book.")
 
-    users = UserRepository(session)
+    users = UserRepository(session, team_id)
     organiser = await users.get(meeting.organiser_slack_id)
     if (
         organiser is None

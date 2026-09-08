@@ -1,31 +1,27 @@
-"""Not a TenantScopedRepository — Slack user IDs are looked up directly by
-their own ID (the primary key), same shape as WorkspaceRepository.
+"""Tenant-scoped like every other entity repository. Slack user IDs are
+unique only *within* a workspace, not globally — two different organisations
+can and do have members with the same Slack user ID — so looking one up by
+that ID alone can return another tenant's row entirely. See
+tests/test_tenant_isolation.py for the check that proves this.
 """
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.models.user import User
+from app.repositories.base import TenantScopedRepository
 
 
-class UserRepository:
-    def __init__(self, session: AsyncSession):
-        self._session = session
+class UserRepository(TenantScopedRepository[User]):
+    model = User
 
     async def get(self, slack_user_id: str) -> User | None:
-        result = await self._session.execute(select(User).filter_by(slack_user_id=slack_user_id))
-        return result.scalar_one_or_none()
+        return await super().get(slack_user_id=slack_user_id)
 
-    async def get_or_create(self, slack_user_id: str, team_id: str, tz: str) -> User:
+    async def get_or_create(self, slack_user_id: str, tz: str) -> User:
         user = await self.get(slack_user_id)
         if user is not None:
             return user
-        user = User(slack_user_id=slack_user_id, team_id=team_id, tz=tz, key_version=1)
-        self._session.add(user)
-        await self._session.flush()
-        return user
+        return await self.add(slack_user_id=slack_user_id, tz=tz, key_version=1)
 
     async def store_google_link(
         self, slack_user_id: str, *, refresh_token_enc: bytes, key_version: int, google_email: str

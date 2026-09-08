@@ -81,11 +81,11 @@ async def oauth_callback(
     cipher = token_cipher_from_settings(settings)
     refresh_token_enc, key_version = cipher.encrypt(refresh_token)
 
-    users = UserRepository(session)
+    users = UserRepository(session, row.team_id)
     # Default tz until Phase 5/UI captures the real one via Slack's
     # users.info — a documented simplification, not a silent guess about
     # anything security- or correctness-sensitive.
-    await users.get_or_create(row.slack_user_id, row.team_id, tz="UTC")
+    await users.get_or_create(row.slack_user_id, tz="UTC")
     await users.store_google_link(
         row.slack_user_id,
         refresh_token_enc=refresh_token_enc,
