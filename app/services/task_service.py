@@ -63,10 +63,27 @@ async def list_open_tasks(
     return await TaskRepository(session, team_id).list(**filters)
 
 
-async def mark_task_done(session: AsyncSession, *, team_id: str, task_id: uuid.UUID) -> Task | None:
+class TaskAuthorizationError(Exception):
+    """Raised when the requester is neither the task's assignee nor its
+    creator — mirrors meeting_service.MeetingConfirmationError's shape, so
+    there's one authorization pattern in the codebase, not two."""
+
+
+async def mark_task_done(
+    session: AsyncSession, *, team_id: str, task_id: uuid.UUID, requesting_slack_user_id: str
+) -> Task | None:
     task = await TaskRepository(session, team_id).get(id=task_id)
     if task is None:
         return None
+    if requesting_slack_user_id not in (task.assignee_slack_id, task.creator_slack_id):
+        raise TaskAuthorizationError("Only the assignee or the creator can mark this task done.")
     task.status = STATUS_DONE
+    await session.flush()
+    # A finished task must stop nagging its assignee — see S3. Cancelling
+    # here and having the scheduler independently skip non-open tasks are
+    # both needed: this closes the gap immediately; the scheduler check is
+    # the last line before a DM actually goes out, for anything already
+    # claimed by a worker mid-flight.
+    await ReminderRepository(session).cancel_pending_for_task(task_id)
     await session.flush()
     return task

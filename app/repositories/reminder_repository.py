@@ -45,3 +45,17 @@ class ReminderRepository:
         if reminder is not None:
             reminder.sent_at = datetime.now(UTC)
             await self._session.flush()
+
+    async def cancel_pending_for_task(self, task_id: uuid.UUID) -> None:
+        """Deletes every not-yet-sent reminder for a task — called when the
+        task is completed, so a finished task stops nagging its assignee. See
+        S3: this and the scheduler's own status check (belt and braces,
+        because the scheduler is the last line before a DM actually goes
+        out) are both needed, not either alone."""
+        stmt = select(Reminder).where(
+            Reminder.task_id == task_id, Reminder.sent_at.is_(None)
+        )
+        result = await self._session.execute(stmt)
+        for reminder in result.scalars().all():
+            await self._session.delete(reminder)
+        await self._session.flush()

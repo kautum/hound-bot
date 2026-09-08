@@ -69,7 +69,12 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
         except ValueError:
             return _ephemeral(f"{raw_id!r} isn't a valid task ID.")
 
-        task = await task_service.mark_task_done(session, team_id=team_id, task_id=task_id)
+        try:
+            task = await task_service.mark_task_done(
+                session, team_id=team_id, task_id=task_id, requesting_slack_user_id=user_id
+            )
+        except task_service.TaskAuthorizationError as exc:
+            return _ephemeral(str(exc))
         await session.commit()
         if task is None:
             return _ephemeral("No task found with that ID in this workspace.")

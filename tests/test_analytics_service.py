@@ -53,7 +53,9 @@ class TestTaskCompletionRate:
             channel_id="C1",
         )
         await db_session.commit()
-        await mark_task_done(db_session, team_id="team-A", task_id=done_task.id)
+        await mark_task_done(
+            db_session, team_id="team-A", task_id=done_task.id, requesting_slack_user_id="U1"
+        )
         await db_session.commit()
 
         since = datetime.now(UTC) - timedelta(days=7)

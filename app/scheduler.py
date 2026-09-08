@@ -6,7 +6,7 @@ DM the assignee on the way to the deadline; when overdue, also DM the creator.
 
 from app.core.security import TokenCipher
 from app.core.slack_client import build_client_for_workspace
-from app.models.task import Task
+from app.models.task import STATUS_OPEN, Task
 from app.repositories.reminder_repository import ReminderRepository
 from app.repositories.workspace_repository import WorkspaceRepository
 from app.services.task_service import ESCALATION_LEVEL_OVERDUE
@@ -24,7 +24,13 @@ async def process_due_reminders(session, cipher: TokenCipher) -> int:
 
     for reminder in due:
         task = await session.get(Task, reminder.task_id)
-        if task is None:
+        # Belt and braces with mark_task_done's own cancellation (S3): a
+        # reminder can still be claimed here if it was already picked up by
+        # a worker before the task was completed, or if cancellation ever
+        # has a gap — the scheduler is the last line before a DM actually
+        # goes out, so it re-checks status itself rather than trusting the
+        # cancellation to have always run.
+        if task is None or task.status != STATUS_OPEN:
             await repo.mark_sent(reminder.id)
             await session.commit()
             continue
