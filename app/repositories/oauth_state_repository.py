@@ -40,6 +40,19 @@ class OAuthStateRepository:
         await self._session.flush()
         return state
 
+    async def peek_valid(self, state: str, *, expected_purpose: str) -> bool:
+        """Checks a state is real, unexpired and of the right purpose, without
+        consuming it. Used by /google/link to reject a garbage or expired
+        state before redirecting to Google — the actual single-use consumption
+        still happens once, at the OAuth callback."""
+        result = await self._session.execute(select(OAuthState).filter_by(state=state))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        if row.purpose != expected_purpose:
+            return False
+        return row.expires_at >= datetime.now(UTC)
+
     async def consume(self, state: str, *, expected_purpose: str) -> OAuthState | None:
         """Single-use: the row is deleted whether or not it's valid, so a
         captured state value can't be replayed even within its TTL."""

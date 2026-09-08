@@ -107,7 +107,9 @@ class TestSlackCommandsEndpoint:
 
 
 class TestLinkCalendarCommand:
-    async def test_returns_a_link_url(self, api_client, monkeypatch):
+    async def test_returns_a_link_url_carrying_only_an_opaque_state(
+        self, api_client, db_session, monkeypatch
+    ):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
         monkeypatch.setattr(
             "app.api.routes_commands.settings.public_base_url", "https://example.ngrok-free.app"
@@ -117,9 +119,25 @@ class TestLinkCalendarCommand:
             "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
         )
         text = response.json()["text"]
-        assert "https://example.ngrok-free.app/google/link" in text
-        assert "team_id=T1" in text
-        assert "slack_user_id=U1" in text
+        assert "https://example.ngrok-free.app/google/link?state=" in text
+        # The identity must never travel in the URL — only Slack's already-
+        # verified signature established it, at the point the state was
+        # issued server-side.
+        assert "team_id=" not in text
+        assert "slack_user_id=" not in text
+        assert "U1" not in text
+
+        from app.models.operational import OAuthState
+
+        state = text.split("state=")[1].strip()
+        from sqlalchemy import select
+
+        row = (
+            await db_session.execute(select(OAuthState).filter_by(state=state))
+        ).scalar_one()
+        assert row.team_id == "T1"
+        assert row.slack_user_id == "U1"
+        assert row.purpose == "google_link"
 
 
 class TestMeetCommand:

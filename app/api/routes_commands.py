@@ -16,6 +16,8 @@ from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import token_cipher_from_settings, verify_slack_signature
 from app.repositories.inbound_job_repository import InboundJobRepository
+from app.api.routes_google import PURPOSE_GOOGLE_LINK
+from app.repositories.oauth_state_repository import OAuthStateRepository
 from app.services import meeting_service, task_service
 from app.services.meet_command_parser import MeetCommandError, parse_meet_command
 from app.services.task_command_parser import TaskCommandError, parse_task_add
@@ -81,17 +83,29 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
     )
 
 
-def _link_calendar_url(team_id: str, slack_user_id: str) -> str:
+def _link_calendar_url(state: str) -> str:
     if not settings.public_base_url:
         raise HTTPException(status_code=500, detail="PUBLIC_BASE_URL is not configured")
     base = settings.public_base_url.rstrip("/")
-    return f"{base}/google/link?team_id={team_id}&slack_user_id={slack_user_id}"
+    return f"{base}/google/link?state={state}"
 
 
-async def _handle_link_calendar_command(form) -> dict:
+async def _handle_link_calendar_command(session: AsyncSession, form) -> dict:
+    # Slack's signature has already authenticated this request (verified in
+    # slack_commands below) — this is the ONLY point in the Google-link flow
+    # where the caller's identity is trustworthy, so the oauth_states row is
+    # issued right here, server-side. /google/link never sees team_id or
+    # slack_user_id at all: it only ever sees the opaque state token. See
+    # PROJECT-WIKI.md / the security audit for why the old shape (identity
+    # passed as a query param) let anyone link their own Google account to
+    # someone else's Slack identity.
     team_id = str(form.get("team_id", ""))
     user_id = str(form.get("user_id", ""))
-    url = _link_calendar_url(team_id, user_id)
+    state = await OAuthStateRepository(session).issue(
+        PURPOSE_GOOGLE_LINK, team_id=team_id, slack_user_id=user_id
+    )
+    await session.commit()
+    url = _link_calendar_url(state)
     return _ephemeral(f"Link your Google Calendar: {url}")
 
 
@@ -197,7 +211,7 @@ async def slack_commands(
     if command == "/task":
         return await _handle_task_command(session, form)
     if command == "/link-calendar":
-        return await _handle_link_calendar_command(form)
+        return await _handle_link_calendar_command(session, form)
     if command == "/meet":
         return await _handle_meet_command(session, form)
 

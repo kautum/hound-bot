@@ -32,16 +32,21 @@ def _redirect_uri() -> str:
 
 
 @router.get("/google/link")
-async def link(
-    team_id: str, slack_user_id: str, session: AsyncSession = Depends(get_session)
-) -> RedirectResponse:
+async def link(state: str, session: AsyncSession = Depends(get_session)) -> RedirectResponse:
+    """Takes only an opaque state token — never an identity. The token was
+    issued by /link-calendar, at the one point in this flow where Slack's
+    signature has already authenticated the caller. This endpoint just checks
+    the token is real and unexpired before handing it to Google; the actual
+    team_id/slack_user_id binding is only ever read back at the callback,
+    from the row this endpoint did not create and cannot forge."""
     if not settings.google_client_id:
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID is not configured")
 
-    state = await OAuthStateRepository(session).issue(
-        PURPOSE_GOOGLE_LINK, team_id=team_id, slack_user_id=slack_user_id
+    valid = await OAuthStateRepository(session).peek_valid(
+        state, expected_purpose=PURPOSE_GOOGLE_LINK
     )
-    await session.commit()
+    if not valid:
+        raise HTTPException(status_code=400, detail="invalid or expired state")
 
     url = build_authorize_url(
         client_id=settings.google_client_id, redirect_uri=_redirect_uri(), state=state
