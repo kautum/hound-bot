@@ -39,6 +39,11 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/slack_workplace_assistant
         run: alembic upgrade head
 
+      - name: Check for uncommitted migration drift
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/slack_workplace_assistant
+        run: alembic check
+
       - name: Run lint
         run: ruff check app tests
 
