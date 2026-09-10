@@ -20,9 +20,12 @@ GOOGLE_FREEBUSY_URL = "https://www.googleapis.com/calendar/v3/freeBusy"
 GOOGLE_EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 
 # freebusy for availability, events only to book — see this module's docstring.
+# userinfo.email is required too: fetch_user_email() below needs it to read the
+# linked account's address, and it's a non-sensitive scope (no extra verification).
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar.freebusy",
     "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/userinfo.email",
 ]
 
 

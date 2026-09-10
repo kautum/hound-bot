@@ -13,29 +13,146 @@ the earliest mutual free slot on your calendar. Public repo:
 name (`app.*`, `slack-workplace-assistant` in `pyproject.toml`) hasn't been renamed to match —
 that's cosmetic and low priority, not a functional gap.
 
-**Last updated:** 2026-09-09, after the overnight fix run plus a same-day follow-up session.
+**Last updated:** 2026-09-10, after live fire started, the build plan was rewritten and
+adversarially tested, and the work split flipped to "Devin builds, Claude judges."
 
 ---
 
 ## YOUR TASKS — read this first, always
 
-These are the only things that need **you** specifically (a login only you can complete, or a
-decision only you should make). Everything else in this file is status, for context.
+Slack install and Google Calendar linking are **both done** — see §0.75. Two things remain that
+only you can do:
 
-1. **Slack: install the app to a real workspace.** Go to your Slack app's settings at
-   `api.slack.com/apps`, **OAuth & Permissions → Install to Workspace → Allow**, then copy the
-   `xoxb-...` bot token it gives you into `.env` as part of seeding a real `workspaces` row
-   (ask for help wiring this in when you're ready — nothing else blocks on it happening first).
-   ~2 minutes.
-2. **Google: run `/link-calendar` in Slack once the bot is installed, and approve the Google
-   consent screen.** This is also how you'll find out whether the Google Cloud Console's
-   Audience/Data Access setup (flagged unconfirmed in §0 below) actually works — if it fails,
-   that's the first thing to debug. ~2 minutes, but tells us something either way.
-3. **Render + Supabase + cron-job.org signups**, if/when you want this actually hosted instead
-   of running locally over ngrok. ~20 minutes. Not required to keep developing or testing.
+1. **Publish the Google OAuth app to "In production."** Cloud Console → OAuth consent screen /
+   Audience → **Publish app**. ~5 minutes. **Time-sensitive**: an app in "Testing" status
+   requesting sensitive scopes (ours: `calendar.freebusy`, `calendar.events`) gets 7-day refresh
+   tokens — the calendar link that works right now will silently die in a week unless this is
+   done. No verification needed to flip this switch; the only costs are an "unverified app"
+   click-through warning and a 100-user lifetime cap, both irrelevant for a supervisor demo.
+2. **Subscribe to `app_uninstalled`** in the Slack app's Event Subscriptions page. ~2 minutes.
+   Needed before the S12 fix (queued as D5, see §0.75) can be verified against real Slack.
 
-**Nothing else is waiting on you.** Everything else — more fixes, more tests, more Devin-driven
-work, the GitHub repo and CI (already done, see below) — can and will proceed without these.
+**Deliberately parked, not forgotten:** Render/Supabase/cron-job.org hosting signups. Per your
+own instruction 2026-09-10, hosting/database/monitoring decisions wait until after the D0–D8
+build queue lands — no point iterating deploys against a build with known gaps. When we get
+there: GitHub Education now has real options worth comparing (§0.75) — check
+`education.github.com/pack` yourself, it's personalised and more current than any web search.
+
+**Nothing else is waiting on you** until D0–D8 finish and hosting comes back up for discussion.
+
+---
+
+## 0.75. Session 2026-09-10 — live fire started, plan rewritten, Devin build queue (D0–D8)
+
+**Full detail and reasoning lives in `~/.claude/plans/alright-now-lets-glistening-yeti.md`,
+section "PLAN OF RECORD — 2026-09-10" — that supersedes everything below it in the plan file,
+including "TONIGHT'S RUN". This section is the short version.**
+
+**The goal was reframed, and it shrinks the project.** User's own words: *"i dont need this bot
+to be self hosting forever as a product, i just want it to live for a few months so i can show
+it to my supervisors and put it in my resume."* Old done-criteria (a stranger installs it into
+their own workspace) is replaced by: a supervisor sees it work live, for a few months, and the
+repo reads well. This drops Google verification, the domain, and "any workspace" scope entirely.
+
+**Real live fire happened, and it found a real bug 138 tests missed.**
+- A real Slack workspace exists now: `Devin Bot`, `team_id=T0C077J6873`. The real `xoxb-` token
+  was verified via `auth.test` and seeded encrypted into Postgres.
+- `uvicorn` + `ngrok` running locally at `https://entrench-uphold-avert.ngrok-free.dev`, `/health`
+  green over the public internet, not just localhost.
+- **`/link-calendar` works end to end for real**: Slack → our state-issuing endpoint → Google
+  consent → our callback → `{"status":"linked","email":"kpkautum2643@gmail.com"}`.
+- Getting there took two real fixes, both things 138 passing tests never caught because every
+  test mocks the external call:
+  1. **Google's Test-User allowlist.** `kpkautum2643@gmail.com` had to be added under Cloud
+     Console → Audience → Test users before Google would even show the consent screen.
+  2. **A real bug: `fetch_user_email()` 401'd.** `GOOGLE_SCOPES` in `app/calendar/google_calendar.py`
+     only ever requested `calendar.freebusy` and `calendar.events` — never `userinfo.email` — so
+     the access token had no permission to read the linked email. Fixed by adding the scope
+     (non-sensitive, no extra Google verification triggered). **This is the project's defining
+     failure mode appearing again**: a passing mocked test hid a call that was never legal to make
+     for real. It's why the plan's next unit (D1) exists — drive every remaining never-yet-real
+     external call once, before trusting any more of the suite's green.
+
+**New risk found by direct research, not assumption: the 7-day token bomb.** A Google OAuth app
+in "Testing" status issuing *sensitive* scopes (ours) gets refresh tokens that expire in 7 days —
+so the link that just started working was going to silently die next week. Fix: publish the app
+to **"In production"** (no verification needed for this step) — refresh tokens become long-lived.
+Costs: an unverified-app warning users click past, and a 100-user lifetime cap on that scope —
+both irrelevant here. **This is now Your Task #1 above and is time-sensitive.**
+
+**GitHub Education, checked today rather than assumed — re-derived twice after getting it wrong
+once:**
+- **DigitalOcean's $200 credit is gone.** Left the pack; last redemption 31 Jul 2026, credits
+  expired 1 Aug 2026. This kills what would have been the obvious hosting upgrade.
+- **A Heroku offer exists** (~$13/mo × 24 months) — a real fork against Render-free (never
+  sleeps, vs. £0/no-card/30-60s cold start). **Deliberately not decided** — parked until after
+  the build per user instruction; the fork is recorded in the plan file so it doesn't need
+  re-deriving.
+- **Sentry Education is free for a year** via the pack (errors, logs, and — usefully — 1 cron
+  monitor). This directly undoes the earlier decision to drop Sentry for an unverified card
+  requirement (see §5/§7's old notes). Queued for whenever hosting/monitoring gets decided.
+- **The free domain** (Namecheap `.me`, no card; or name.com `.dev`/`.app`, requires a card) is
+  now pure polish, not load-bearing — Google verification dropped out of scope, so nothing
+  actually needs a domain anymore. Optional, any time.
+- **Authoritative source is `education.github.com/pack` itself**, personalised to the account —
+  web search results disagreed with each other and one still advertised the dead DigitalOcean
+  credit.
+
+**The plan was adversarially tested before any more code moves — two subagents, results
+reconciled rather than merged blindly.** A fork (full project context) and a cold
+general-purpose agent (zero context, briefed only on the stated goal) both attacked the draft
+plan independently. Combined, 12 concrete defects against the actual code:
+
+- **The most serious one, and it's a process risk, not a code risk:** `tests/conftest.py`'s
+  `drop_all` runs against whatever `DATABASE_URL` is set, and `.env` — pointing at the live
+  seeded database with the real linked Google token — sits in the same worktree Devin will run
+  in. One missed env override and Devin's own test run destroys state that cost real human
+  clicks and cannot be regenerated without them. **This is now unit D0**, a mechanical guard
+  (`conftest.py` refuses to run outside `{swa_test, swa_devin}`) written by Claude, not Devin,
+  before any Devin task fires.
+- **A near-miss that would have shipped a bug:** the original "add a retention sweep" unit had
+  no pinned cutoff. Deleting `processed_events` rows too aggressively re-opens Slack's own
+  dedupe window and lets a retried event create a duplicate task. Fixed: cutoff pinned in the
+  spec at 7 days (168× Slack's ~1h retry ceiling), and `oauth_states` was dropped from that unit
+  entirely once checked against the code — it already self-deletes on consume.
+  `oauth_state_repository.py:60-62`.
+- Live fire's `/meet` step needed correcting too: the parser hard-rejects zero participants
+  (`meet_command_parser.py:43-44,56-57`), and a script cannot obtain a genuine Slack
+  `response_url` — that step now splits into scripted-with-a-capture-endpoint plus one
+  human-typed `/meet` in real Slack.
+- README/manifest/LICENSE were originally sequenced last despite being the artifacts a
+  supervisor or recruiter actually opens, and the README is currently factually wrong ("112
+  tests", old definition of done, links a path only the author can open). Moved up.
+- A demo video/GIF had no unit at all despite being named in the definition of done — now D8.
+- **Standing rule, not a one-off unit:** any Devin diff touching a repository file gets checked
+  for a raw `select()`/`.filter_by()` that bypasses the tenant-scoped base class — the entire S2
+  fix rests on that one convention with nothing mechanical enforcing it.
+
+**Decision, restated because it reverses §0.5's note below: "Devin does the majority of the
+remaining build, Claude is judge and instructor."** Not "Devin gets disjoint infrastructure
+work" as previously decided — that changed today, on explicit instruction, because Devin credits
+are otherwise unspendable for this user. The mitigation for the risk that creates (Devin touching
+files that used to be off-limits, like `app/agent/tools.py`) is the review discipline in the plan
+file's "Execution model" section — read every diff in full, re-run the suite here not just trust
+Devin's VM, check specific invariants (the tenant-scoping grep, the agent-tools injection
+boundary) rather than skim.
+
+**The build queue, in order — D0 through D8, with owners:**
+
+| # | Unit | Owner |
+|---|---|---|
+| D0 | Guard `conftest.py` against wiping the live seeded DB | **Claude** |
+| D1 | Live-fire driver script for the remaining never-real calls | Devin writes; Claude runs + judges |
+| D2 | Fix whatever D1 finds | Devin builds, Claude specs |
+| D3 | README rewrite — currently false, moved up from last | Devin drafts, Claude rewrites |
+| D4 | Save the Slack app manifest to the repo | Devin |
+| D5 | S12 (`app_uninstalled` write path) + S13 (silent unknown-event-type swallow) | Devin |
+| D6 | S11 — on-demand `@bot digest` tool | Devin, Claude checks the injection-boundary invariant |
+| D7 | `processed_events` 7-day retention sweep only (not `oauth_states`) | Devin |
+| D8 | Demo video shot list + recording | Claude scripts, user records |
+
+Full specs, exact file:line evidence, and the ready-to-fire first Devin prompt are in the plan
+file — read it before starting D0, don't reconstruct it from memory.
 
 ---
 
@@ -292,28 +409,43 @@ why review still matters: **Devin wrote `DATABASE_URL: postgresql://...` instead
 Caught on review, fixed directly rather than re-billing a round trip for a one-line fix. Read
 every Devin diff before trusting it, even a successful-looking one.
 
-### What to actually delegate — the plan's Part 5 rule, restated for what's left
+### The delegation boundary reversed on 2026-09-10 — read this, not the paragraph you remember
 
-Delegate when: success is machine-verifiable, iteration is high/unpredictable, the spec is
-short relative to the output, and a bug is low blast radius. Keep it yourself when: the spec
-*is* the hard part, a bug would be catastrophic and invisible in review, or it depends on
-decisions made in conversation.
+**Old rule (through 2026-09-09): Devin gets disjoint infrastructure work only; the security-
+sensitive core (`app/agent/tools.py`, `app/services/`, `app/repositories/`, `app/core/security.py`,
+`alembic/`) was never delegated.** That rule is **overridden by explicit user instruction**
+2026-09-10: *"devin does all the building, using the credits... u just be the judge and
+instructor."* Devin credits are otherwise unspendable for this user, so this is the user's
+deliberate tradeoff to make, not an oversight.
 
-**Genuinely good Devin candidates remaining** (all Infrastructure-track, `tests/`, `.github/`,
-`app/ui/`, `app/observability/` — never `app/core/`, `app/models/`, `app/repositories/`,
-`app/services/`, `app/agent/`, `alembic/`):
+**What replaces the old file-based exclusion list: a review discipline, applied to every diff
+regardless of which files it touches.** Full detail in the plan file's "Execution model —
+Devin builds, Claude judges" section. The load-bearing pieces:
 
-| Unit | Ready-to-paste Goal/Touch | Why it fits |
-|---|---|---|
-| Block Kit UI | Goal: "Replace plain-text ephemeral replies in `app/api/routes_commands.py` with Block Kit messages for `/task list` and `/meet` propose/book, without changing any function signature or return type — just the `text` field's content shape via `blocks`." Touch: `app/api/routes_commands.py`, new `app/ui/blocks.py` | Verbose, needs post→look→fix iteration, zero judgment calls |
-| Observability | Goal: "Add structured JSON logging (one line per request/job with team_id, duration, outcome) and confirm `/health` still returns 200." Touch: `app/main.py`, `app/worker.py`, new `app/observability/` | Mechanical, low blast radius. **Do not add Sentry** — its free tier's card requirement is disputed across sources, unverified |
-| Timeouts/backoff/pooling | Goal: "Add exponential backoff with a max of 3 retries to every outbound `httpx` call in `app/calendar/google_calendar.py` and `app/core/slack_client.py`'s underlying client; verify existing tests still pass." | Well-known pattern, machine-verifiable |
-| Load test | Goal: "Write a script that hits `/slack/events` with a valid signature N times concurrently and reports p50/p95/p99 latency, proving the <3s ack holds under load." Touch: new `scripts/load_test.py` | Pure measurement, no judgment |
+1. **D0 exists specifically because of this reversal** — a mechanical guard in `conftest.py` so
+   a Devin test run can never `drop_all` the live seeded database (real Slack token, real linked
+   Google refresh token) no matter what `DATABASE_URL` ends up being. Written by Claude, before
+   any Devin task fires. Do not skip it just because it looks like process overhead.
+2. **Two specific, mechanical checks, not "read carefully":**
+   - Any diff touching a repository file: grep it for a raw `select()`/`.filter_by()` that
+     bypasses the tenant-scoped base class. The entire S2 tenant-isolation fix rests on that one
+     convention (`TenantScopedRepository`) with nothing enforcing it structurally.
+   - Any diff touching `app/agent/tools.py`: confirm `team_id`/`slack_user_id` still come only
+     from `AgentContext`, never from a model-supplied argument. That file's own docstring names
+     this as the injection boundary.
+3. **Re-run the full suite here, against `swa_test`, never trust "tests pass in Devin's VM"
+   as evidence.** Precedent: Devin's CI PR looked correct on review-by-glance and shipped a
+   wrong database driver (`postgresql://` instead of `postgresql+asyncpg://`) that would have
+   broken every CI run.
+4. **Reject and re-instruct rather than quietly patch.** A silent fix teaches Devin nothing
+   about what was wrong and hides how good the actual output was.
 
-**Do not delegate:** anything touching `app/agent/tools.py`'s whitelist (security boundary),
-`app/services/meeting_service.py` (this session found three real bugs in it — organiser
-availability, unpersisted slot, missing authorization check — exactly the "catastrophic and
-invisible in review" category), or the schema/migrations.
+**Current queue (D0–D8, full specs in the plan file)** is the concrete application of this —
+D0 is the guard itself; D1 is Devin-written but Claude-run (it needs real credentials this
+machine holds, not Devin's VM); D6 (agent tool) gets the specific injection-boundary check above
+on top of a normal read.
+
+**The invocation and spec template above are unchanged.** What changed is scope, not mechanics.
 
 ---
 
