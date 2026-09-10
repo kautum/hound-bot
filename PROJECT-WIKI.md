@@ -1,4 +1,4 @@
-# PROJECT-WIKI.md — Slack Workplace Assistant
+# PROJECT-WIKI.md — Hound
 
 Read this before touching the code, even in a fresh low-effort session with no memory of how
 this was built. It exists so you don't have to re-scan the codebase or re-derive decisions
@@ -7,11 +7,39 @@ this file is the *operational* companion: what's actually done, what's a known t
 to use Devin correctly). The full plan with every decision's reasoning is at
 `~/.claude/plans/alright-now-lets-glistening-yeti.md`.
 
-**Last updated:** 2026-09-08, after an overnight autonomous fix-and-test run.
+**The project is named "Hound"** — a Slack bot that chases down overdue tasks and sniffs out
+the earliest mutual free slot on your calendar. Public repo:
+**https://github.com/kautum/hound-bot** (main branch, CI green). The internal package/module
+name (`app.*`, `slack-workplace-assistant` in `pyproject.toml`) hasn't been renamed to match —
+that's cosmetic and low priority, not a functional gap.
+
+**Last updated:** 2026-09-09, after the overnight fix run plus a same-day follow-up session.
 
 ---
 
-## -1. Tonight's run — read this if it's the morning after 2026-09-08
+## YOUR TASKS — read this first, always
+
+These are the only things that need **you** specifically (a login only you can complete, or a
+decision only you should make). Everything else in this file is status, for context.
+
+1. **Slack: install the app to a real workspace.** Go to your Slack app's settings at
+   `api.slack.com/apps`, **OAuth & Permissions → Install to Workspace → Allow**, then copy the
+   `xoxb-...` bot token it gives you into `.env` as part of seeding a real `workspaces` row
+   (ask for help wiring this in when you're ready — nothing else blocks on it happening first).
+   ~2 minutes.
+2. **Google: run `/link-calendar` in Slack once the bot is installed, and approve the Google
+   consent screen.** This is also how you'll find out whether the Google Cloud Console's
+   Audience/Data Access setup (flagged unconfirmed in §0 below) actually works — if it fails,
+   that's the first thing to debug. ~2 minutes, but tells us something either way.
+3. **Render + Supabase + cron-job.org signups**, if/when you want this actually hosted instead
+   of running locally over ngrok. ~20 minutes. Not required to keep developing or testing.
+
+**Nothing else is waiting on you.** Everything else — more fixes, more tests, more Devin-driven
+work, the GitHub repo and CI (already done, see below) — can and will proceed without these.
+
+---
+
+## -1. Tonight's run (2026-09-08) — read this if it's the morning after
 
 Two adversarial audits found 4 blockers and 12 real defects (2 critical security holes)
 hiding behind the "112 tests passing" claim. Full plan and evidence:
@@ -41,16 +69,53 @@ hiding behind the "112 tests passing" claim. Full plan and evidence:
 - `LIVE-FIRE.md` — our Slack HMAC implementation cross-validated in both directions
   against `slack_sdk`'s own independent `SignatureVerifier`.
 
-**Not done tonight, deliberately** (see the plan's "Nothing is asked of you before you
-sleep" section): the real ngrok round trip, a real Groq call, a real Slack post,
-GitHub repo + CI (Unit 9), and S11/S12 (analytics wiring, uninstall handling — Unit 10).
-None of these need a login you haven't already provided except the three in the plan's
-morning checklist (Slack install, `/link-calendar` consent, Render/Supabase/cron signups).
+**Not done that night, deliberately:** the real ngrok round trip, a real Slack post, and
+S11/S12 (analytics wiring, uninstall handling — Unit 10). See below — most of the rest of
+Unit 8/9 got done the next day instead.
 
-**Devin spend tonight:** one load-test task (committed), and 4/5 of a test-repair task
+**Devin spend that night:** one load-test task (committed), and 4/5 of a test-repair task
 (the 5th finished by hand after a hard time cutoff — see the commit for what happened).
-GPT-6 Astra was tried once and rejected instantly ("Upgrade to Pro") — not available on
-this account; the default model was used instead.
+
+---
+
+## 0.5. Follow-up session, 2026-09-09 — audit, live Groq call, GitHub repo, CI
+
+**An independent Devin-run audit re-verified S1–S10 from scratch** (read the actual source,
+didn't just trust PROJECT-WIKI.md's word), and ran the full suite itself: 138/138 passed. It
+also flagged 10 new gaps, all operational-hardening rather than structural
+(rate limiting, HTTP retry/backoff, DB pool sizing, audit logging, job cleanup, etc.) — ranked
+by severity in the plan file if you want the full list. **One of its findings was checked and
+found wrong**: it claimed `db.py` was missing `pool_pre_ping` — it's actually there (added in
+the S9 fix). Worth remembering: audit output gets verified against the source too, not trusted
+just because it came from a second model.
+
+**A real, live Groq API call was made** (not mocked) — "remind me to file the report friday at
+5pm UTC" correctly resolved to a `create_task` tool call with `due_at_utc: 2026-09-10T17:00:00Z`,
+proving the model can do relative-date math against a stated "today." Confirms the one external
+LLM contract most likely to silently break.
+
+**GitHub repo created and CI is green**, twice: `https://github.com/kautum/hound-bot`, pushed
+from this worktree's branch as `main`. First run (the full existing test suite, migrations,
+lint) passed clean on the first try. A second commit added an `alembic check` CI step
+(`.github/workflows/ci.yml`) as a fast-failing companion to
+`tests/test_migrations_match_models.py`'s in-suite drift check — also green.
+
+**Devin model access, confirmed directly, not assumed:** on this account, **any** explicit
+`--model` flag — tested across every vendor (GPT-6 Astra, Claude Opus 5, Claude Sonnet 4.6,
+GPT-5.3-Codex, GLM-5.3, SWE-1.6) — returns an instant `Error: Upgrade to Pro to access this
+model`. This is **not brand-specific**; it's a blanket gate on explicit model selection. **Only
+the CLI's default model (no `--model` flag at all) is usable**, and it's what did all of
+tonight's and today's real Devin work. Don't spend more credits testing other model names —
+the gate is structural. Decision going forward (2026-09-09): the user doesn't want a Pro
+upgrade, so **Devin does a minority of the remaining build** (well-scoped, disjoint,
+machine-verifiable tasks it's naturally suited for), and Claude does the majority directly,
+acting as Devin's reviewer/judge on whatever it's given.
+
+**A GitHub repo-creation attempt was blocked once by Claude Code's own safety classifier**
+(different from anything Devin- or model-related) — creating a new public repo and pushing
+needs the user's live, in-the-moment go-ahead in the conversation; it can't be pre-authorized
+by an earlier "yes" a few turns back. Once the user re-confirmed in the same turn, it went
+through cleanly. Worth knowing if this needs doing again on some other repo.
 
 ---
 
