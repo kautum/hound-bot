@@ -1,0 +1,45 @@
+display_information:
+  name: Hound
+  description: Task tracking with automated reminders and meeting scheduling via Google Calendar
+  background_color: "#3AA3E3"
+
+features:
+  bot_user:
+    display_name: Hound
+    always_online: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - commands
+      - users:read  # Reserved for future per-user timezone lookup
+      - im:history  # Reserved for future DM message handling
+      - im:write
+  redirect_urls:
+    # Replace YOUR-PUBLIC-BASE-URL with your actual deployment base URL
+    # (e.g., https://your-app.onrender.com or your ngrok URL for local dev)
+    - https://YOUR-PUBLIC-BASE-URL/slack/oauth/callback
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - app_uninstalled
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+
+slash_commands:
+  - command: /task
+    description: Create, list, or complete tasks with deadlines
+    usage_hint: "add @assignee Title | 2026-09-10T17:00+00:00 / list / done <task-id>"
+    should_escape: false
+  - command: /link-calendar
+    description: Link your Google Calendar for meeting scheduling
+    usage_hint: ""
+    should_escape: false
+  - command: /meet
+    description: Find mutual free time and book meetings
+    usage_hint: "@user1 @user2 30 | 2026-09-10T09:00+00:00 | 2026-09-10T17:00+00:00"
+    should_escape: false
