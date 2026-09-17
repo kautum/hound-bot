@@ -7,6 +7,7 @@ It exists because mocks hid a real bug (the userinfo.email scope miss).
 Usage:
     python scripts/live_fire.py --dry-run    # Print plan, no network calls
     python scripts/live_fire.py --step 1     # Run step 1 only
+    python scripts/live_fire.py --step 5 --meeting-id <uuid>  # Run step 5 independently
     python scripts/live_fire.py              # Run all steps
 
 Requirements:
@@ -404,7 +405,7 @@ async def step4_meet_propose() -> dict[str, Any]:
             meeting_id = meeting_id_match.group(1) if meeting_id_match else None
             
             if meeting_id:
-                print(f"Extracted meeting ID: {meeting_id}")
+                print(f"MEETING_ID: {meeting_id}")
             
             result = {
                 "captured": capture.captured_payloads[0],
@@ -497,6 +498,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Live-fire driver for external API calls")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without making network calls")
     parser.add_argument("--step", type=int, choices=[1, 2, 3, 4, 5], help="Run only the specified step")
+    parser.add_argument("--meeting-id", type=str, help="Meeting ID for step 5 (to run step 5 independently)")
     args = parser.parse_args()
     
     if args.dry_run:
@@ -538,10 +540,8 @@ async def main():
     
     if args.step == 5 or args.step is None:
         if args.step == 5 and meeting_id is None:
-            # If running step 5 alone, need to get meeting ID from somewhere
-            print("ERROR: Step 5 requires a meeting ID. Run step 4 first, or provide one.")
-            print("For manual testing, you can query the database for a proposed meeting.")
-            sys.exit(1)
+            # If running step 5 alone without a meeting ID from step 4, use CLI argument
+            meeting_id = args.meeting_id
         result5 = await step5_meet_book(meeting_id)
         print(f"\nStep 5 complete: {result5}")
     
