@@ -482,8 +482,10 @@ on top of a normal read.
    run `alembic upgrade head` against the same database you also run `pytest` against, the last
    test's teardown drops everything, leaving `alembic_version` claiming a revision that no
    longer matches reality. **Use a genuinely separate, disposable database for manual
-   migration checks** (`make db-up` gives you docker-compose's Postgres for exactly this;
-   don't share it with a database you're also using for something you want to persist).
+   migration checks** (`make db-up` creates `swa_test` against your native local Postgres for
+   exactly this; don't share it with a database you're also using for something you want to
+   persist). There is no docker-compose in this project — Docker was never installed on the
+   dev machine (see the 2026-09-05 Part 0 findings); Postgres runs natively via `brew services`.
 
 5. **Groq's real per-minute token budget (8,000 TPM) is the binding constraint, not its
    per-day request quota.** Keep tool schemas in `app/agent/tools.py` minimal. This was a
@@ -502,7 +504,7 @@ on top of a normal read.
 
 ```
 cp .env.example .env
-make db-up       # docker-compose Postgres
+make db-up       # native local Postgres, creates the app + swa_test databases
 make migrate     # alembic upgrade head
 make test        # pytest — self-provisions schema per test, doesn't need `make migrate` first
 make lint        # ruff check app tests

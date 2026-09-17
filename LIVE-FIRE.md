@@ -56,3 +56,60 @@ public internet and this app — passed cleanly against an independent implement
 remaining live-fire steps (real ngrok round trip, real Groq call, real Slack post) are
 mechanical once the three morning login steps are done; nothing in tonight's fixes changed
 their shape.
+
+---
+
+## Live-fire driver script (2026-09-10)
+
+A comprehensive live-fire driver script now exists at `scripts/live_fire.py`. This script
+was created to drive each real external call once and print the ACTUAL response body,
+because mocks hid a real bug (the userinfo.email scope miss).
+
+### Usage
+
+```bash
+# Print plan without making network calls
+python scripts/live_fire.py --dry-run
+
+# Run a specific step only
+python scripts/live_fire.py --step 1
+
+# Run all steps
+python scripts/live_fire.py
+```
+
+### What the script tests
+
+1. **Signed /task add through public URL** — Creates a Slack-signed request to `/slack/commands`
+   with a task due 30 seconds in the future, then asserts the row exists in Postgres and
+   prints the response body.
+
+2. **Internal tick for reminder firing** — Calls `/internal/tick` with `CRON_SHARED_SECRET` to
+   process due reminders and prints the response body (reminders_sent count).
+
+3. **Google freeBusy query** — Fetches the stored refresh token from the database and calls
+   the Google Calendar freeBusy API, printing the raw response body.
+
+4. **/meet propose with capture endpoint** — Starts a local capture endpoint, sends
+   `/meet propose` with `response_url` pointing to the capture endpoint, prints what would
+   have been posted to `response_url`, and prints instructions for running `/meet` in real
+   Slack (since a script cannot obtain a genuine Slack `response_url`).
+
+5. **/meet book against proposal** — Uses the meeting ID from step 4 to call `/meet book`
+   via a signed request and prints the created Google event ID.
+
+### Requirements
+
+- All environment variables must be set (DATABASE_URL, SLACK_SIGNING_SECRET, etc.)
+- The app must be running locally with ngrok (PUBLIC_BASE_URL points to it)
+- A real Slack workspace must be installed with the bot
+- A Google account must be linked (kpkautum2643@gmail.com)
+- Test user IDs can be set via environment variables: TEST_TEAM_ID, TEST_USER_ID,
+  TEST_CHANNEL_ID, TEST_UNLINKED_USER_ID
+
+### Why this exists
+
+This script exists precisely because mocks hid a real bug — the `userinfo.email` scope
+was missing from `GOOGLE_SCOPES`, which caused `fetch_user_email()` to 401 in production
+even though all tests passed. Driving every external call once against real services
+catches bugs that unit tests with mocks cannot.

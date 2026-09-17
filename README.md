@@ -41,7 +41,7 @@ which needs a live deployment first.
 
 ```
 cp .env.example .env   # fill in credentials as each phase needs them
-make db-up              # local Postgres via docker-compose
+make db-up              # checks for a local native Postgres, creates the app + test databases
 make migrate
 make test
 make lint

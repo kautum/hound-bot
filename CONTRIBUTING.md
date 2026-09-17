@@ -47,7 +47,7 @@ free-tier math in `ARCHITECTURE.md`, needs a human to sign off before it lands.
 ## Local setup
 
 ```
-make db-up      # starts local Postgres via docker-compose
+make db-up      # requires a native local Postgres already running; creates the databases
 make migrate    # applies Alembic migrations
 make test       # runs the test suite
 make lint       # ruff check
