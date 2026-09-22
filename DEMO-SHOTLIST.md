@@ -33,18 +33,27 @@ whichever channel you'll demo `/task` and `@mention` in — see `LIVE-FIRE.md`'s
    from Postgres. If it doesn't come back in the digest's exact format, that's expected
    model non-determinism (see `LIVE-FIRE.md`) — just re-ask; a second take is fine.
 
-6. **`/meet @you @teammate 30 | <window start> | <window end>`** — proposes a slot.
-   **This step needs the Google Calendar link to be live** (published-to-production +
-   re-linked — see `PROJECT-WIKI.md`'s current blockers). If that's not done by the time
-   you record, either skip this shot and caption "calendar linking demoed separately" or
-   wait until it's unblocked. Don't fake it.
+6. **`/meet @you @teammate 30 | <window start> | <window end>`** — proposes a slot and shows
+   a "Book" button, not a UUID to copy-paste. **This step needs the Google Calendar link to
+   be live** (published-to-production + re-linked — see `PROJECT-WIKI.md`'s current
+   blockers). If that's not done by the time you record, either skip this shot and caption
+   "calendar linking demoed separately" or wait until it's unblocked. Don't fake it.
 
-7. **(If step 6 ran)** `/meet book <meeting-id>` — shows the real Google Calendar event
-   being created, then `/meet cancel <meeting-id>` — shows it actually being deleted from
-   the real calendar, not just marked cancelled in our own DB.
+7. **(If step 6 ran)** Click "Book" — shows the real Google Calendar event being created and
+   a "Cancel" button appearing in its place. Click "Cancel" — shows it actually being
+   deleted from the real calendar, not just marked cancelled in our own DB.
 
-8. **(Optional)** `/task reassign <id> @someone-else` — shows the task moving to a new
-   assignee; a follow-up reminder would now DM the new person instead.
+8. **Open Hound's App Home tab** in Slack (the "Home" tab next to Messages) — shows the same
+   open-tasks list with "Mark done" buttons, refreshed live. Proves it's a persistent app
+   surface, not just slash commands.
+
+9. **(Optional)** `/task reassign <id> @someone-else` — shows the task moving to a new
+   assignee; a follow-up reminder would now DM the new person instead, and that DM also
+   carries a "Mark done" button.
+
+10. **(Optional, one-time)** Reinstall the app (or show a screenshot) to demonstrate the
+    HTML install-success page and the welcome DM — the first thing an admin actually sees,
+    not a JSON blob.
 
 ## What NOT to show
 
@@ -58,4 +67,4 @@ whichever channel you'll demo `/task` and `@mention` in — see `LIVE-FIRE.md`'s
 
 Save as `demo.mp4` (or `.gif` if short enough) at the repo root, embed it in `README.md`'s
 top section, and update `README.md`'s test-count line if further work changed the count
-since 177.
+since 193.
