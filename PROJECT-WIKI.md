@@ -13,37 +13,35 @@ the earliest mutual free slot on your calendar. Public repo:
 name (`app.*`, `slack-workplace-assistant` in `pyproject.toml`) hasn't been renamed to match —
 that's cosmetic and low priority, not a functional gap.
 
-**Last updated:** 2026-09-22, after three new feature batches landed on top of everything in
-§0.10 — task reassignment, meeting cancellation, recurring tasks (with a schema migration), and
-a Block Kit interactive UI backed by a new signed `/slack/interactions` endpoint. See §0.11.
-177 tests passing. Git is still broken and nothing is committed yet.
+**Last updated:** 2026-09-22, after Batches F–I landed on top of everything in §0.11 —
+Block Kit "Book"/"Cancel" buttons on `/meet`, a friendly HTML install page + welcome DM, an
+App Home tab, and a "Mark done" button on reminder DMs. See §0.12. 193 tests passing, all
+committed and pushed — see §0.12 for how, since the local `git` binary is still broken.
 
 ---
 
 ## YOUR TASKS — read this first, always
 
-**Two blockers, both stop everything else, in order:**
+**One blocker left, and it's optional:**
 
-1. **Fix git.** Every git command on this machine currently fails with *"You have not agreed to
-   the Xcode license agreements."* This almost certainly blocks Devin too (it operates in this
-   same worktree and needs git). Run, in your own terminal:
-   ```
-   sudo xcodebuild -license accept
-   ```
-2. **Re-link Google Calendar — but publish first, or it just dies again.** The refresh token
+1. **Re-link Google Calendar — but publish first, or it just dies again.** The refresh token
    linked 2026-09-10 has actually expired (`invalid_grant`, confirmed live 2026-09-21) because
    the app was never published to production — the 7-day-Testing-mode risk this file warned
    about materialized. Order matters:
    - Google Cloud Console → OAuth consent screen / Audience → **Publish app** first
    - Then re-link via `/link-calendar` in Slack
+   - This only unblocks D1's last 3 steps (real freeBusy/propose/book against Google) and the
+     `/meet propose`/`book` shots in `DEMO-SHOTLIST.md`. Everything else already works.
 
-**Everything else is done or in progress without you** — see §0.10 and §0.11 for what landed,
-including a real live-database incident that was found and fully recovered from, and four new
-features (reassign, cancel, recurring tasks, Block Kit UI). Hosting (Render/Supabase/
-cron-job.org) is explicitly deferred past "finished," not just parked — a demo video doesn't
-care whether it's recorded against localhost or a hosted URL. Once you clear the two blockers
-above: everything gets committed, D1's last 3 steps run, and `DEMO-SHOTLIST.md` is ready
-whenever you want to record (it now covers the new features too).
+**Git is no longer a blocker** — the local `git` binary is still broken (Xcode license), but
+§0.12 documents a working `dulwich` (pure-Python git) workaround that commits and pushes over
+HTTPS using the `gh` CLI's existing token, no sudo needed. **Every batch through this session
+is committed and pushed** to `worktree-slack-bot-scaffold`, and **PR #1 is open with CI green**:
+https://github.com/kautum/hound-bot/pull/1 — merge it (or ask to have it merged) once you've
+looked it over. Hosting (Render/Supabase/cron-job.org) is explicitly deferred past "finished,"
+not just parked — a demo video doesn't care whether it's recorded against localhost or a
+hosted URL. `DEMO-SHOTLIST.md` covers all 10 shots including the new UI (App Home, Book/Cancel
+buttons, install page) and is ready to record whenever you are.
 
 ---
 
@@ -462,6 +460,76 @@ not skimmed. The judge-loop is not ceremony; it has now caught 8 distinct real b
 sessions of Devin dispatches, and the pattern is consistent: greenfield feature code from an
 agent still needs a human (or Claude, playing that role) to check assumptions the agent's own
 tests don't think to question.
+
+---
+
+## 0.12. Same-day continuation, 2026-09-22 — Batches F–I, the git binary worked around, PR open
+
+Explicit instruction this session: finish the remaining UX gaps identified in the prior
+self-review, treat Claude as the sole orchestrator ("director"), and end the session with a
+git-committed, GitHub-visible, demo-ready product with no complications for the user to
+resolve. Four more Devin batches landed, each judged the same way as every prior batch —
+full diff read, tests re-run locally against `swa_test`, never trusting Devin's own claim.
+
+**Batch F — Block Kit "Book"/"Cancel" buttons on `/meet`.** `handle_meet_propose` now
+attaches a "Book" button (action_id `meet_book`) to its response; a successful `/meet book`
+attaches a "Cancel" button in its place. `/slack/interactions` dispatches both action_ids by
+enqueueing the same `meet_book`/`meet_cancel` jobs the slash-command path already used — the
+booking/cancelling itself still happens in the worker, never inline, because both call
+Google's API and must stay under Slack's 3-second budget. `meet_cancel` clicks are checked
+against `meeting.organiser_slack_id` inline before enqueueing (a non-organiser gets an
+immediate rejection, no job created); `meet_book` clicks are allowed to enqueue from anyone
+because the worker's `meeting_service.confirm_meeting` already enforces organiser-only
+booking and will reject a non-organiser's booking attempt after the fact — this mirrors the
+exact asymmetry the pre-existing slash-command path already had, not a new hole. Verified:
+184/184 tests, ruff clean. **Also found and fixed directly (not delegated): the Slack app
+manifest never got an `interactivity` block after Batch E added `/slack/interactions` in the
+prior session** — without it, no Block Kit button (old or new) actually works against real
+Slack. Added `settings.interactivity` to `slack-app-manifest.yaml`.
+
+**Batch G — friendly install flow.** `GET /slack/oauth/callback` now returns a real HTML
+success page (inline CSS, no external assets) instead of a bare JSON blob, and — using
+Slack's `authed_user.id` field from the OAuth exchange, which Slack returns without any
+extra scope — sends a best-effort welcome DM listing the available commands. DM failure or a
+missing `authed_user` is logged and never blocks the install (broad `except Exception`, but
+logged with `exc_info=True`, not swallowed). Verified: 188/188 tests, ruff clean.
+
+**Batch H — App Home tab.** New `app_home_opened` handling: `routes_events.py` now enqueues
+it like every other event (never handled inline), `worker.py`'s `handle_app_home_opened`
+looks up the viewer's own open tasks (`list_open_tasks`, correctly scoped by `job.team_id`)
+and calls `views_publish`. `app/ui/blocks.py` factored the existing per-task
+section+button block into a shared `_build_task_block` helper, reused by both the task-list
+view and the new `build_app_home_view`. Manifest updated with `features.app_home` and the
+new event subscription. Verified: 192/192 tests, ruff clean, including a tenant-isolation
+test that creates tasks in two teams and asserts only the viewer's own team's tasks appear.
+
+**Batch I — reminder DMs get the same "Mark done" button.** `app/scheduler.py`'s
+`process_due_reminders` now passes `blocks=_build_task_block(task)` alongside the existing
+`text=` fallback on its `chat_postMessage` call — no change to escalation logic, recipients,
+or authorization; clicking the button goes through the exact same `/slack/interactions`
+`task_done` path as everywhere else. Verified: 193/193 tests, ruff clean.
+
+**The git binary is still broken (Xcode license, needs a `sudo` password nobody's typed in),
+and there's still no path to fix it without that password — but it no longer matters.**
+`pip install --user dulwich` (a pure-Python git implementation) opens this exact repo/worktree
+directly, with zero dependency on the system `git` binary or Xcode. `dulwich.porcelain.add`,
+`.commit`, and `.push` (the last one authenticated over HTTPS using `gh auth token` — the
+`gh` CLI was already logged in) all work correctly against a live GitHub remote. Three real
+commits landed this session (feature batches, then the scheduler batch that was mid-flight
+during the first commit, then a docs pass), each pushed and each triggering a green CI run
+before the next one. **`gh pr create` still shells out to local `git` and fails** — worked
+around by calling `gh api repos/kautum/hound-bot/pulls` directly instead. **PR #1 is open,
+CI green, not yet merged:** https://github.com/kautum/hound-bot/pull/1 — merging it was left
+for the user to actually look at first rather than auto-merged, even under the "no need for
+approval" blanket instruction, because merging to `main` is the one step here that's genuinely
+hard to reverse cleanly on a public repo.
+
+**Not done this session, and why:** digest replies were deliberately *not* converted to
+Block Kit. The digest's final text is composed by the LLM on top of the `get_digest` tool's
+raw string return (see §0.11's LLM tool-routing non-determinism note) — forcing structured
+blocks through that path would mean either post-processing the model's freeform reply
+(fragile) or reworking the agent loop to special-case one tool's output shape (disproportionate
+complexity for a portfolio demo). Kept as plain text on purpose, not an oversight.
 
 ---
 
