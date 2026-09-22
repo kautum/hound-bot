@@ -4,7 +4,7 @@ import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
-from app.agent.tools import TOOLS, AgentContext, CreateTaskArgs, ProposeMeetingArgs
+from app.agent.tools import TOOLS, AgentContext, CreateTaskArgs, GetDigestArgs, ProposeMeetingArgs
 from app.calendar.provider import BusyBlock
 from app.core.security import TokenCipher
 from app.models import User, Workspace
@@ -47,10 +47,10 @@ class TestCreateTaskArgs:
 
 
 class TestToolRegistry:
-    def test_exactly_three_tools_are_whitelisted(self):
+    def test_exactly_four_tools_are_whitelisted(self):
         """The whitelist itself IS the injection defence — see
         app/agent/tools.py's module docstring."""
-        assert set(TOOLS.keys()) == {"create_task", "list_tasks", "propose_meeting"}
+        assert set(TOOLS.keys()) == {"create_task", "list_tasks", "get_digest", "propose_meeting"}
 
     async def test_create_task_handler_writes_a_real_task(self, db_session):
         await _make_workspace(db_session, "team-A")
@@ -73,6 +73,15 @@ class TestToolRegistry:
 
         result = await TOOLS["list_tasks"].handler(ctx, ListTasksArgs())
         assert "Visible task" in result
+
+    async def test_get_digest_handler_returns_weekly_summary(self, db_session):
+        await _make_workspace(db_session, "team-A")
+        ctx = AgentContext(session=db_session, team_id="team-A", slack_user_id="U1")
+        result = await TOOLS["get_digest"].handler(ctx, GetDigestArgs())
+        assert "Weekly digest" in result
+        assert "Task completion rate:" in result
+        assert "Overdue tasks:" in result
+        assert "Meetings this week:" in result
 
 
 class TestProposeMeetingTool:

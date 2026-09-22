@@ -6,7 +6,13 @@ from cryptography.fernet import Fernet
 from app.calendar.provider import BusyBlock, InvalidGrantError
 from app.core.security import TokenCipher
 from app.models import User, Workspace
-from app.services.meeting_service import book_meeting, propose_meeting
+from app.models.meeting import STATUS_BOOKED, STATUS_CANCELLED, STATUS_PROPOSED
+from app.services.meeting_service import (
+    MeetingConfirmationError,
+    book_meeting,
+    cancel_meeting,
+    propose_meeting,
+)
 
 
 class FakeProvider:
@@ -16,6 +22,7 @@ class FakeProvider:
         self._busy_by_token = busy_by_token
         self._raises_for = raises_invalid_grant_for or set()
         self.created_events: list[dict] = []
+        self.cancelled_events: list[str] = []
 
     async def get_busy_blocks(self, refresh_token, window_start_utc, window_end_utc):
         if refresh_token in self._raises_for:
@@ -27,6 +34,9 @@ class FakeProvider:
             {"title": title, "start": start_utc, "end": end_utc, "attendees": attendee_emails}
         )
         return "evt_999"
+
+    async def cancel_event(self, refresh_token, event_id: str) -> None:
+        self.cancelled_events.append(event_id)
 
 
 async def _make_workspace(session, team_id: str) -> None:
@@ -389,4 +399,176 @@ class TestConfirmMeeting:
                 meeting_id=proposal.meeting.id,
                 requesting_slack_user_id="U_ALICE",
                 title="Sync",
+            )
+
+
+class TestCancelMeeting:
+    async def test_cancel_proposed_meeting_makes_no_google_calls(self, db_session):
+        """Cancelling a PROPOSED meeting only changes status — no Google
+        event was ever created, so no delete call is needed."""
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await db_session.commit()
+
+        provider = FakeProvider(busy_by_token={})
+        proposal = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=[],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+        await db_session.commit()
+        assert proposal.meeting is not None
+        assert proposal.meeting.status == STATUS_PROPOSED
+
+        cancelled = await cancel_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            meeting_id=proposal.meeting.id,
+            requesting_slack_user_id="U_ALICE",
+        )
+        assert cancelled.status == STATUS_CANCELLED
+        assert provider.cancelled_events == []  # no Google call made
+
+    async def test_cancel_booked_meeting_calls_google_delete(self, db_session):
+        """Cancelling a BOOKED meeting must delete the real Google event."""
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await db_session.commit()
+
+        provider = FakeProvider(busy_by_token={})
+        proposal = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=[],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+        await db_session.commit()
+        assert proposal.meeting is not None
+
+        # Book it first
+        booked = await book_meeting(
+            db_session,
+            provider,
+            cipher,
+            meeting=proposal.meeting,
+            slot_start_utc=proposal.slot_start_utc,
+            organiser_refresh_token="tok-alice",
+            attendee_emails=["a@x.com"],
+            title="Sync",
+        )
+        await db_session.commit()
+        assert booked.status == STATUS_BOOKED
+        assert booked.google_event_id == "evt_999"
+
+        # Now cancel it
+        cancelled = await cancel_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            meeting_id=booked.id,
+            requesting_slack_user_id="U_ALICE",
+        )
+        assert cancelled.status == STATUS_CANCELLED
+        assert provider.cancelled_events == ["evt_999"]  # Google delete called
+
+    async def test_cancel_rejects_non_organiser(self, db_session):
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await db_session.commit()
+
+        provider = FakeProvider(busy_by_token={})
+        proposal = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=[],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+        await db_session.commit()
+        assert proposal.meeting is not None
+
+        with pytest.raises(MeetingConfirmationError, match="Only the meeting organiser"):
+            await cancel_meeting(
+                db_session,
+                provider,
+                cipher,
+                team_id="team-A",
+                meeting_id=proposal.meeting.id,
+                requesting_slack_user_id="U_BOB",  # not the organiser
+            )
+
+    async def test_cancel_rejects_already_cancelled(self, db_session):
+        await _make_workspace(db_session, "team-A")
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_linked_user(
+            db_session, cipher, "U_ALICE", "team-A", "UTC", "tok-alice", "a@x.com"
+        )
+        await db_session.commit()
+
+        provider = FakeProvider(busy_by_token={})
+        proposal = await propose_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            organiser_slack_id="U_ALICE",
+            participant_slack_ids=[],
+            duration=timedelta(minutes=30),
+            search_window_start_utc=datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            search_window_end_utc=datetime(2026, 9, 7, 17, 0, tzinfo=UTC),
+        )
+        await db_session.commit()
+        assert proposal.meeting is not None
+
+        # Cancel it once
+        await cancel_meeting(
+            db_session,
+            provider,
+            cipher,
+            team_id="team-A",
+            meeting_id=proposal.meeting.id,
+            requesting_slack_user_id="U_ALICE",
+        )
+        await db_session.commit()
+
+        # Try to cancel again
+        with pytest.raises(MeetingConfirmationError, match="already cancelled"):
+            await cancel_meeting(
+                db_session,
+                provider,
+                cipher,
+                team_id="team-A",
+                meeting_id=proposal.meeting.id,
+                requesting_slack_user_id="U_ALICE",
             )

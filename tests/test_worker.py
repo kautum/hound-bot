@@ -1,5 +1,6 @@
 import json
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import respx
@@ -8,16 +9,27 @@ from cryptography.fernet import Fernet
 from app.agent.loop import GROQ_CHAT_URL
 from app.calendar.google_calendar import GOOGLE_FREEBUSY_URL, GOOGLE_TOKEN_URL
 from app.core.security import TokenCipher
-from app.models import InboundJob, User, Workspace
-from app.worker import _strip_bot_mention, handle_app_mention, handle_meet_propose
+from app.models import InboundJob, Task, User, Workspace
+from app.worker import (
+    _strip_bot_mention,
+    handle_app_home_opened,
+    handle_app_mention,
+    handle_meet_book,
+    handle_meet_cancel,
+    handle_meet_propose,
+)
 
 
 class FakeSlackClient:
     def __init__(self):
         self.posted: list[tuple[str, str]] = []
+        self.published_views: list[tuple[str, dict]] = []
 
     async def chat_postMessage(self, channel: str, text: str):
         self.posted.append((channel, text))
+
+    async def views_publish(self, user_id: str, view: dict):
+        self.published_views.append((user_id, view))
 
 
 def _text_response(text: str) -> httpx.Response:
@@ -251,6 +263,12 @@ class TestHandleMeetPropose:
         sent = json.loads(response_url_route.calls.last.request.content)
         assert "Earliest mutual slot" in sent["text"]
         assert "2026-09-07T09:00:00+00:00" in sent["text"]
+        assert "blocks" in sent
+        assert len(sent["blocks"]) == 2
+        assert sent["blocks"][0]["type"] == "section"
+        assert sent["blocks"][1]["type"] == "actions"
+        assert sent["blocks"][1]["elements"][0]["action_id"] == "meet_book"
+        assert sent["blocks"][1]["elements"][0]["text"]["text"] == "Book"
 
     async def test_missing_response_url_does_not_crash(self, monkeypatch, db_session):
         monkeypatch.setattr("app.worker.settings.google_client_id", None)
@@ -277,6 +295,89 @@ class TestHandleMeetPropose:
             # crash was even possible in the first place.
             await handle_meet_propose(db_session, job, cipher)
             assert len(mock_router.calls) == 0
+
+
+class TestHandleMeetBook:
+    """Test that handle_meet_book includes a Cancel button in its response."""
+
+    @respx.mock
+    async def test_books_and_includes_cancel_button(self, monkeypatch, db_session):
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        token_enc, version = cipher.encrypt("tok-alice")
+
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+        db_session.add(
+            User(
+                slack_user_id="U1",
+                team_id="team-A",
+                tz="UTC",
+                google_refresh_token_enc=token_enc,
+                key_version=version,
+                google_email="a@x.com",
+            )
+        )
+        await db_session.commit()
+
+        monkeypatch.setattr("app.worker.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.worker.settings.google_client_secret", "gsecret")
+
+        from app.calendar.google_calendar import GOOGLE_EVENTS_URL, GOOGLE_TOKEN_URL
+
+        respx.post(GOOGLE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "ya29.fake"})
+        )
+        respx.post(GOOGLE_EVENTS_URL).mock(
+            return_value=httpx.Response(200, json={"id": "evt_123"})
+        )
+        response_url_route = respx.post("https://hooks.slack.invalid/fake").mock(
+            return_value=httpx.Response(200, json={"ok": True})
+        )
+
+        from app.models.meeting import STATUS_PROPOSED, Meeting, MeetingParticipant
+
+        meeting_id = uuid.uuid4()
+        db_session.add(
+            Meeting(
+                id=meeting_id,
+                team_id="team-A",
+                organiser_slack_id="U1",
+                duration_min=30,
+                status=STATUS_PROPOSED,
+                proposed_start_utc=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+        db_session.add(
+            MeetingParticipant(
+                meeting_id=meeting_id,
+                team_id="team-A",
+                slack_user_id="U1",
+            )
+        )
+        await db_session.commit()
+
+        job = InboundJob(
+            team_id="team-A",
+            event_type="meet_book",
+            payload={
+                "meeting_id": str(meeting_id),
+                "requesting_user_id": "U1",
+                "response_url": "https://hooks.slack.invalid/fake",
+            },
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+
+        await handle_meet_book(db_session, job, cipher)
+
+        sent = json.loads(response_url_route.calls.last.request.content)
+        assert "Booked" in sent["text"]
+        assert "blocks" in sent
+        assert len(sent["blocks"]) == 2
+        assert sent["blocks"][0]["type"] == "section"
+        assert sent["blocks"][1]["type"] == "actions"
+        assert sent["blocks"][1]["elements"][0]["action_id"] == "meet_cancel"
+        assert sent["blocks"][1]["elements"][0]["text"]["text"] == "Cancel"
 
 
 class TestWorkerSupervision:
@@ -346,3 +447,320 @@ class TestWorkerSupervision:
         # Reached iteration 2 despite iteration 1 raising — the loop did not die.
         assert call_count == 2
         assert worker_module.worker_is_alive() is True
+
+
+class TestUnknownEventTypeHandling:
+    """S13: jobs with unknown event_type must be marked failed, not done."""
+
+    async def test_unknown_event_type_is_marked_failed_with_error(
+        self, db_session, monkeypatch
+    ):
+        """When a job has an event_type not in HANDLERS, it should be marked
+        failed with a clear error message, not silently marked done."""
+        from cryptography.fernet import Fernet
+        from sqlalchemy import select
+
+        from app.core.security import TokenCipher
+        from app.worker import process_one_batch
+
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+
+        # Create a workspace first (required by foreign key constraint)
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+
+        # Create a job with an unknown event_type
+        job = InboundJob(
+            team_id="team-A",
+            event_type="unknown_event_type",
+            payload={},
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+        db_session.add(job)
+        await db_session.commit()
+
+        # Process the batch
+        await process_one_batch(db_session, cipher)
+
+        # Verify the job is marked failed with a non-null error
+        result = await db_session.execute(select(InboundJob).filter_by(id=job.id))
+        updated_job = result.scalar_one_or_none()
+        assert updated_job is not None
+        assert updated_job.status == "failed"
+        assert updated_job.error is not None
+        assert "no handler registered for event_type" in updated_job.error
+
+
+class TestHandleMeetCancel:
+    """Cancelling a meeting mirrors handle_meet_book's structure — ack-and-enqueue
+    with a response_url reply."""
+
+    @respx.mock
+    async def test_cancels_and_posts_to_response_url(self, monkeypatch, db_session):
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        token_enc, version = cipher.encrypt("tok-alice")
+
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+        db_session.add(
+            User(
+                slack_user_id="U1",
+                team_id="team-A",
+                tz="UTC",
+                google_refresh_token_enc=token_enc,
+                key_version=version,
+                google_email="a@x.com",
+            )
+        )
+        await db_session.commit()
+
+        monkeypatch.setattr("app.worker.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.worker.settings.google_client_secret", "gsecret")
+
+        from app.calendar.google_calendar import GOOGLE_EVENTS_URL, GOOGLE_TOKEN_URL
+
+        respx.post(GOOGLE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "ya29.fake"})
+        )
+        respx.delete(f"{GOOGLE_EVENTS_URL}/evt_123").mock(
+            return_value=httpx.Response(200, json={})
+        )
+        response_url_route = respx.post("https://hooks.slack.invalid/fake").mock(
+            return_value=httpx.Response(200, json={"ok": True})
+        )
+
+        import uuid
+
+        from app.models.meeting import STATUS_BOOKED, Meeting
+
+        meeting_id = uuid.uuid4()
+        db_session.add(
+            Meeting(
+                id=meeting_id,
+                team_id="team-A",
+                organiser_slack_id="U1",
+                duration_min=30,
+                status=STATUS_BOOKED,
+                google_event_id="evt_123",
+            )
+        )
+        await db_session.commit()
+
+        job = InboundJob(
+            team_id="team-A",
+            event_type="meet_cancel",
+            payload={
+                "meeting_id": str(meeting_id),
+                "requesting_user_id": "U1",
+                "response_url": "https://hooks.slack.invalid/fake",
+            },
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+
+        await handle_meet_cancel(db_session, job, cipher)
+
+        sent = json.loads(response_url_route.calls.last.request.content)
+        assert "Cancelled" in sent["text"]
+
+        from sqlalchemy import select
+
+        result = await db_session.execute(select(Meeting).filter_by(id=meeting_id))
+        meeting = result.scalar_one()
+        from app.models.meeting import STATUS_CANCELLED
+
+        assert meeting.status == STATUS_CANCELLED
+
+
+class TestHandleAppHomeOpened:
+    """Test App Home tab handler for showing user's open tasks."""
+
+    async def test_publishes_view_with_open_tasks(self, db_session, monkeypatch):
+        """User with open tasks gets a view containing task titles and buttons."""
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+
+        fake_client = FakeSlackClient()
+        monkeypatch.setattr(
+            "app.worker.build_client_for_workspace", lambda workspace, cipher: fake_client
+        )
+
+        # Create two open tasks for the user
+        db_session.add(
+            Task(
+                team_id="team-A",
+                creator_slack_id="U1",
+                assignee_slack_id="U1",
+                title="Task one",
+                due_at_utc=datetime.now(UTC) + timedelta(hours=24),
+                status="open",
+                channel_id="C1",
+            )
+        )
+        db_session.add(
+            Task(
+                team_id="team-A",
+                creator_slack_id="U1",
+                assignee_slack_id="U1",
+                title="Task two",
+                due_at_utc=datetime.now(UTC) + timedelta(hours=48),
+                status="open",
+                channel_id="C1",
+            )
+        )
+        await db_session.commit()
+
+        job = InboundJob(
+            team_id="team-A",
+            event_type="app_home_opened",
+            payload={"user": "U1"},
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+
+        await handle_app_home_opened(db_session, job, cipher)
+
+        assert len(fake_client.published_views) == 1
+        user_id, view = fake_client.published_views[0]
+        assert user_id == "U1"
+        assert view["type"] == "home"
+        assert "blocks" in view
+
+        # Check that both tasks appear with their titles
+        block_texts = [
+            block["text"]["text"]
+            for block in view["blocks"]
+            if block.get("type") == "section"
+        ]
+        assert any("Task one" in text for text in block_texts)
+        assert any("Task two" in text for text in block_texts)
+
+        # Check that "Mark done" buttons are present
+        action_blocks = [
+            block for block in view["blocks"] if block.get("type") == "actions"
+        ]
+        assert len(action_blocks) == 2
+        for action_block in action_blocks:
+            assert action_block["elements"][0]["action_id"] == "task_done"
+            assert action_block["elements"][0]["text"]["text"] == "Mark done"
+
+    async def test_shows_no_tasks_message_when_empty(self, db_session, monkeypatch):
+        """User with zero open tasks gets the 'No open tasks' message."""
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+
+        fake_client = FakeSlackClient()
+        monkeypatch.setattr(
+            "app.worker.build_client_for_workspace", lambda workspace, cipher: fake_client
+        )
+
+        job = InboundJob(
+            team_id="team-A",
+            event_type="app_home_opened",
+            payload={"user": "U1"},
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+
+        await handle_app_home_opened(db_session, job, cipher)
+
+        assert len(fake_client.published_views) == 1
+        user_id, view = fake_client.published_views[0]
+        assert user_id == "U1"
+        assert view["type"] == "home"
+        assert len(view["blocks"]) == 1
+        assert view["blocks"][0]["type"] == "section"
+        assert "No open tasks assigned to you" in view["blocks"][0]["text"]["text"]
+
+    async def test_tenant_isolation_tasks_from_other_team_not_shown(
+        self, db_session, monkeypatch
+    ):
+        """View only contains tasks from the user's own team, not other teams."""
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+        await _make_workspace_with_real_token(db_session, "team-B", cipher)
+
+        fake_client = FakeSlackClient()
+        monkeypatch.setattr(
+            "app.worker.build_client_for_workspace", lambda workspace, cipher: fake_client
+        )
+
+        # Create task in team-A for user U1
+        db_session.add(
+            Task(
+                team_id="team-A",
+                creator_slack_id="U1",
+                assignee_slack_id="U1",
+                title="Team A task",
+                due_at_utc=datetime.now(UTC) + timedelta(hours=24),
+                status="open",
+                channel_id="C1",
+            )
+        )
+        # Create task in team-B for user U1 (should NOT appear)
+        db_session.add(
+            Task(
+                team_id="team-B",
+                creator_slack_id="U1",
+                assignee_slack_id="U1",
+                title="Team B task",
+                due_at_utc=datetime.now(UTC) + timedelta(hours=24),
+                status="open",
+                channel_id="C2",
+            )
+        )
+        await db_session.commit()
+
+        # Open home for user in team-A
+        job = InboundJob(
+            team_id="team-A",
+            event_type="app_home_opened",
+            payload={"user": "U1"},
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+
+        await handle_app_home_opened(db_session, job, cipher)
+
+        assert len(fake_client.published_views) == 1
+        _, view = fake_client.published_views[0]
+
+        block_texts = [
+            block["text"]["text"]
+            for block in view["blocks"]
+            if block.get("type") == "section"
+        ]
+        assert any("Team A task" in text for text in block_texts)
+        assert not any("Team B task" in text for text in block_texts)
+
+    async def test_uninstalled_workspace_does_nothing(self, db_session, monkeypatch):
+        """Uninstalled workspace should not publish any view."""
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+
+        from app.repositories.workspace_repository import WorkspaceRepository
+
+        await WorkspaceRepository(db_session).mark_uninstalled("team-A")
+        await db_session.commit()
+
+        fake_client = FakeSlackClient()
+        monkeypatch.setattr(
+            "app.worker.build_client_for_workspace", lambda workspace, cipher: fake_client
+        )
+
+        job = InboundJob(
+            team_id="team-A",
+            event_type="app_home_opened",
+            payload={"user": "U1"},
+            status="pending",
+            created_at=datetime.now(UTC),
+        )
+
+        await handle_app_home_opened(db_session, job, cipher)
+
+        assert len(fake_client.published_views) == 0

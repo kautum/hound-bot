@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+import uuid
 from datetime import UTC, datetime
 
 from app.models import Workspace
@@ -67,9 +68,10 @@ class TestSlackCommandsEndpoint:
             content=list_body,
             headers=_signed_form_headers(list_body, SIGNING_SECRET),
         )
-        assert "Write the report" in list_response.json()["text"]
-
-        task_id = list_response.json()["text"].split("(")[1].split(")")[0]
+        assert list_response.json()["response_type"] == "ephemeral"
+        blocks = list_response.json()["blocks"]
+        assert "Write the report" in blocks[0]["text"]["text"]
+        task_id = blocks[1]["elements"][0]["value"]
 
         done_body = _form_body(
             command="/task",
@@ -84,6 +86,34 @@ class TestSlackCommandsEndpoint:
             headers=_signed_form_headers(done_body, SIGNING_SECRET),
         )
         assert "Marked" in done_response.json()["text"]
+
+    async def test_add_with_recurrence_interval(self, api_client, db_session, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
+
+        add_body = _form_body(
+            command="/task",
+            text="add <@UASSIGNEE1|bob> Weekly report | 2026-09-10T17:00+00:00 | repeat:7",
+            team_id="T1",
+            user_id="U_CREATOR",
+            channel_id="C1",
+        )
+        add_response = await api_client.post(
+            "/slack/commands",
+            content=add_body,
+            headers=_signed_form_headers(add_body, SIGNING_SECRET),
+        )
+        assert add_response.status_code == 200
+        assert "Created task" in add_response.json()["text"]
+
+        # Verify the task was created with recurrence_interval_days=7
+        from sqlalchemy import select
+
+        from app.models import Task
+
+        result = await db_session.execute(select(Task).filter_by(team_id="T1"))
+        task = result.scalar_one()
+        assert task.recurrence_interval_days == 7
 
     async def test_bad_syntax_returns_usage_not_a_crash(self, api_client, monkeypatch):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
@@ -326,10 +356,15 @@ class TestMeetCommand:
             # run the whole polling loop.
             await handle_meet_propose(db_session, job, cipher)
 
-            follow_up_text = json.loads(response_url_route.calls.last.request.content)["text"]
+            follow_up = json.loads(response_url_route.calls.last.request.content)
+            follow_up_text = follow_up["text"]
             assert "Earliest mutual slot" in follow_up_text
             assert "2026-09-07T09:00:00+00:00" in follow_up_text
-            meeting_id = follow_up_text.split("/meet book ")[1].split("`")[0]
+            # Extract meeting_id from the blocks (section block contains the meeting ID)
+            blocks = follow_up.get("blocks", [])
+            assert len(blocks) == 2
+            assert blocks[0]["type"] == "section"
+            meeting_id = blocks[0]["text"]["text"].split("Meeting ID: `")[1].split("`")[0]
 
             respx.post(GOOGLE_EVENTS_URL).mock(
                 return_value=httpx.Response(200, json={"id": "evt_end_to_end"})
@@ -375,3 +410,167 @@ class TestMeetCommand:
         meeting = result.scalar_one()
         assert meeting.status == STATUS_BOOKED
         assert meeting.google_event_id == "evt_end_to_end"
+
+
+class TestTaskReassignCommand:
+    async def test_reassign_task_command(self, api_client, db_session, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
+
+        # First create a task
+        add_body = _form_body(
+            command="/task",
+            text="add <@UASSIGNEE1|bob> Write the report | 2026-09-10T17:00+00:00",
+            team_id="T1",
+            user_id="U_CREATOR",
+            channel_id="C1",
+        )
+        add_response = await api_client.post(
+            "/slack/commands",
+            content=add_body,
+            headers=_signed_form_headers(add_body, SIGNING_SECRET),
+        )
+        assert add_response.status_code == 200
+
+        # Get the task ID from the list command
+        list_body = _form_body(
+            command="/task", text="list", team_id="T1", user_id="UASSIGNEE1", channel_id="C1"
+        )
+        list_response = await api_client.post(
+            "/slack/commands",
+            content=list_body,
+            headers=_signed_form_headers(list_body, SIGNING_SECRET),
+        )
+        task_id = list_response.json()["blocks"][1]["elements"][0]["value"]
+
+        # Reassign as the creator
+        reassign_body = _form_body(
+            command="/task",
+            text=f"reassign {task_id} <@UASSIGNEE2|alice>",
+            team_id="T1",
+            user_id="U_CREATOR",
+            channel_id="C1",
+        )
+        reassign_response = await api_client.post(
+            "/slack/commands",
+            content=reassign_body,
+            headers=_signed_form_headers(reassign_body, SIGNING_SECRET),
+        )
+        assert reassign_response.status_code == 200
+        assert "Reassigned" in reassign_response.json()["text"]
+
+    async def test_reassign_invalid_uuid(self, api_client, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        body = _form_body(
+            command="/task",
+            text="reassign not-a-uuid <@U2>",
+            team_id="T1",
+            user_id="U1",
+            channel_id="C1",
+        )
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
+        assert response.status_code == 200
+        assert "isn't a valid task ID" in response.json()["text"]
+
+    async def test_list_returns_block_kit_with_mark_done_buttons(
+        self, api_client, db_session, monkeypatch
+    ):
+        """Test that /task list returns Block Kit format with Mark done buttons."""
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
+
+        add_body = _form_body(
+            command="/task",
+            text="add <@UASSIGNEE1|bob> Write the report | 2026-09-10T17:00+00:00",
+            team_id="T1",
+            user_id="U_CREATOR",
+            channel_id="C1",
+        )
+        add_response = await api_client.post(
+            "/slack/commands",
+            content=add_body,
+            headers=_signed_form_headers(add_body, SIGNING_SECRET),
+        )
+        assert add_response.status_code == 200
+
+        list_body = _form_body(
+            command="/task", text="list", team_id="T1", user_id="UASSIGNEE1", channel_id="C1"
+        )
+        list_response = await api_client.post(
+            "/slack/commands",
+            content=list_body,
+            headers=_signed_form_headers(list_body, SIGNING_SECRET),
+        )
+        assert list_response.status_code == 200
+        assert list_response.json()["response_type"] == "ephemeral"
+        blocks = list_response.json()["blocks"]
+
+        # Should have 2 blocks per task: section + actions
+        assert len(blocks) == 2
+
+        # First block is a section with the task title
+        assert blocks[0]["type"] == "section"
+        assert "Write the report" in blocks[0]["text"]["text"]
+
+        # Second block is an actions block with a button
+        assert blocks[1]["type"] == "actions"
+        assert len(blocks[1]["elements"]) == 1
+        button = blocks[1]["elements"][0]
+        assert button["type"] == "button"
+        assert button["text"]["text"] == "Mark done"
+        assert button["action_id"] == "task_done"
+
+        # The button value should be a valid UUID (the task ID)
+        uuid.UUID(button["value"])  # Will raise if invalid
+
+
+class TestMeetCancelCommand:
+    async def test_cancel_command_enqueues_job(self, api_client, db_session, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", "gcid")
+        monkeypatch.setattr("app.api.routes_commands.settings.google_client_secret", "gsecret")
+        monkeypatch.setattr("app.api.routes_commands.settings.encryption_key", "irrelevant-here")
+        await _make_workspace(db_session, "T1")
+
+        meeting_id = "11111111-1111-1111-1111-111111111111"
+
+        body = _form_body(
+            command="/meet",
+            text=f"cancel {meeting_id}",
+            team_id="T1",
+            user_id="U1",
+            response_url="https://hooks.slack.invalid/commands/fake",
+        )
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
+
+        assert "Cancelling that meeting" in response.json()["text"]
+
+        from sqlalchemy import select
+
+        from app.models import InboundJob
+
+        result = await db_session.execute(
+            select(InboundJob).filter_by(team_id="T1", event_type="meet_cancel")
+        )
+        jobs = result.scalars().all()
+        assert len(jobs) == 1
+        assert jobs[0].payload["meeting_id"] == meeting_id
+        assert jobs[0].payload["requesting_user_id"] == "U1"
+
+    async def test_cancel_invalid_uuid(self, api_client, monkeypatch):
+        monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        body = _form_body(
+            command="/meet",
+            text="cancel not-a-uuid",
+            team_id="T1",
+            user_id="U1",
+        )
+        response = await api_client.post(
+            "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
+        )
+        assert response.status_code == 200
+        assert "isn't a valid meeting ID" in response.json()["text"]

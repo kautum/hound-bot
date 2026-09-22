@@ -20,7 +20,8 @@ from app.repositories.inbound_job_repository import InboundJobRepository
 from app.repositories.oauth_state_repository import OAuthStateRepository
 from app.services import task_service
 from app.services.meet_command_parser import MeetCommandError, parse_meet_command
-from app.services.task_command_parser import TaskCommandError, parse_task_add
+from app.services.task_command_parser import MENTION_RE, TaskCommandError, parse_task_add
+from app.ui.blocks import build_task_list_blocks
 
 router = APIRouter()
 
@@ -37,7 +38,9 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
 
     if text.startswith("add "):
         try:
-            assignee, title, due_at_utc = parse_task_add(text.removeprefix("add ").strip())
+            assignee, title, due_at_utc, recurrence_interval_days = parse_task_add(
+                text.removeprefix("add ").strip()
+            )
         except TaskCommandError as exc:
             return _ephemeral(str(exc))
 
@@ -49,6 +52,7 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
             title=title,
             due_at_utc=due_at_utc,
             channel_id=channel_id,
+            recurrence_interval_days=recurrence_interval_days,
         )
         await session.commit()
         return _ephemeral(f'Created task "{task.title}", due {due_at_utc.isoformat()}.')
@@ -59,8 +63,7 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
         )
         if not tasks:
             return _ephemeral("No open tasks assigned to you.")
-        lines = [f"• {t.title} — due {t.due_at_utc.isoformat()} ({t.id})" for t in tasks]
-        return _ephemeral("\n".join(lines))
+        return {"response_type": "ephemeral", "blocks": build_task_list_blocks(tasks)}
 
     if text.startswith("done "):
         raw_id = text.removeprefix("done ").strip()
@@ -80,11 +83,44 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
             return _ephemeral("No task found with that ID in this workspace.")
         return _ephemeral(f'Marked "{task.title}" done.')
 
+    if text.startswith("reassign "):
+        rest = text.removeprefix("reassign ").strip()
+        # Parse: <task-id> <@newuser>
+        parts = rest.split(maxsplit=1)
+        if len(parts) != 2:
+            return _ephemeral("Usage: /task reassign <task-id> @newassignee")
+        raw_id, mention = parts
+        try:
+            task_id = uuid.UUID(raw_id)
+        except ValueError:
+            return _ephemeral(f"{raw_id!r} isn't a valid task ID.")
+
+        mention_match = MENTION_RE.match(mention)
+        if not mention_match:
+            return _ephemeral("Usage: /task reassign <task-id> @newassignee")
+        new_assignee_slack_id = mention_match.group(1)
+
+        try:
+            task = await task_service.reassign_task(
+                session,
+                team_id=team_id,
+                task_id=task_id,
+                requesting_slack_user_id=user_id,
+                new_assignee_slack_id=new_assignee_slack_id,
+            )
+        except task_service.TaskAuthorizationError as exc:
+            return _ephemeral(str(exc))
+        await session.commit()
+        if task is None:
+            return _ephemeral("No task found with that ID in this workspace.")
+        return _ephemeral(f'Reassigned "{task.title}" to <@{new_assignee_slack_id}>.')
+
     return _ephemeral(
         "Usage:\n"
-        "`/task add @assignee Title | 2026-09-10T17:00+00:00`\n"
+        "`/task add @assignee Title | 2026-09-10T17:00+00:00 | repeat:7`\n"
         "`/task list`\n"
-        "`/task done <task-id>`"
+        "`/task done <task-id>`\n"
+        "`/task reassign <task-id> @newassignee`"
     )
 
 
@@ -148,6 +184,34 @@ async def _handle_meet_book(
     return _ephemeral("Booking that meeting — I'll follow up here shortly.")
 
 
+async def _handle_meet_cancel(
+    session: AsyncSession, team_id: str, requesting_user_id: str, raw_id: str, response_url: str
+) -> dict:
+    try:
+        meeting_id = uuid.UUID(raw_id)
+    except ValueError:
+        return _ephemeral(f"{raw_id!r} isn't a valid meeting ID.")
+
+    calendar_configured = bool(
+        settings.google_client_id and settings.google_client_secret and settings.encryption_key
+    )
+    if not calendar_configured:
+        return _ephemeral("Calendar scheduling isn't configured on this workspace yet.")
+
+    await InboundJobRepository(session).enqueue(
+        team_id=team_id,
+        event_type="meet_cancel",
+        payload={
+            "meeting_id": str(meeting_id),
+            "requesting_user_id": requesting_user_id,
+            "response_url": response_url,
+        },
+    )
+    await session.commit()
+
+    return _ephemeral("Cancelling that meeting — I'll follow up here shortly.")
+
+
 async def _handle_meet_command(session: AsyncSession, form) -> dict:
     text = str(form.get("text", "")).strip()
     team_id = str(form.get("team_id", ""))
@@ -157,6 +221,11 @@ async def _handle_meet_command(session: AsyncSession, form) -> dict:
     if text.startswith("book "):
         return await _handle_meet_book(
             session, team_id, organiser_id, text.removeprefix("book ").strip(), response_url
+        )
+
+    if text.startswith("cancel "):
+        return await _handle_meet_cancel(
+            session, team_id, organiser_id, text.removeprefix("cancel ").strip(), response_url
         )
 
     try:

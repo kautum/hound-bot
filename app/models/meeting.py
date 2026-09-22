@@ -15,6 +15,7 @@ from app.models.base import Base
 
 STATUS_PROPOSED = "proposed"
 STATUS_BOOKED = "booked"
+STATUS_CANCELLED = "cancelled"
 
 
 class Meeting(Base):

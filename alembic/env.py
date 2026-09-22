@@ -1,10 +1,12 @@
 import asyncio
+import os
+import re
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from alembic import context
 from app.core.config import settings
 from app.models import Base
 
@@ -22,6 +24,35 @@ if config.config_file_name is not None:
 # involved — to point at a scratch database; that takes precedence.
 db_url = config.attributes.get("sqlalchemy.url") or settings.database_url
 target_metadata = Base.metadata
+
+# tests/conftest.py's D0 guard only intercepts pytest's own drop_all — it
+# never covers a bare `alembic downgrade`/`upgrade` invoked directly on the
+# CLI. That gap is exactly what let an unattended `alembic downgrade base`
+# wipe the live seeded workspace/user rows on 2026-09-21 (restored from a
+# 2026-09-10 backup afterwards). This guard closes it: any alembic run
+# against a database name outside the always-safe test set requires an
+# explicit, one-time opt-in env var naming that exact database, so an agent
+# or script can never do this by accident again.
+_ALWAYS_SAFE_DB_NAMES = {"swa_test", "swa_devin", "swa_migration_check"}
+
+
+def _assert_safe_migration_target(url: str) -> None:
+    match = re.search(r"/([^/?]+)(?:\?|$)", url)
+    db_name = match.group(1) if match else None
+    if db_name in _ALWAYS_SAFE_DB_NAMES:
+        return
+    confirmed = os.environ.get("CONFIRM_LIVE_ALEMBIC")
+    if confirmed == db_name:
+        return
+    raise RuntimeError(
+        f"Refusing to run alembic against database {db_name!r} — it is not in "
+        f"the always-safe set {sorted(_ALWAYS_SAFE_DB_NAMES)}. If you really "
+        f"intend to migrate {db_name!r} (take a pg_dump backup first), set "
+        f"CONFIRM_LIVE_ALEMBIC={db_name} explicitly for this one invocation."
+    )
+
+
+_assert_safe_migration_target(db_url)
 
 
 def run_migrations_offline() -> None:

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import token_cipher_from_settings
+from app.repositories.processed_event_repository import ProcessedEventRepository
 from app.scheduler import process_due_reminders
 
 router = APIRouter()
@@ -28,4 +29,13 @@ async def internal_tick(
 
     cipher = token_cipher_from_settings(settings)
     sent = await process_due_reminders(session, cipher)
-    return {"reminders_sent": sent}
+
+    # Sweep old processed_events (7-day retention) — must commit explicitly:
+    # get_session's context manager closes without committing, which would
+    # otherwise silently roll back this delete outside of tests that commit
+    # manually.
+    processed_event_repo = ProcessedEventRepository(session)
+    deleted = await processed_event_repo.sweep_old_processed_events()
+    await session.commit()
+
+    return {"reminders_sent": sent, "processed_events_deleted": deleted}

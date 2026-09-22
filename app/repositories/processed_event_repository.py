@@ -5,8 +5,9 @@ concurrent requests for the same event_id can't both see "not yet processed"
 and both proceed. See ARCHITECTURE.md's ack-and-enqueue section.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,3 +30,12 @@ class ProcessedEventRepository:
         result = await self._session.execute(stmt)
         await self._session.flush()
         return result.rowcount == 1
+
+    async def sweep_old_processed_events(self) -> int:
+        """Delete processed_events rows where processed_at is older than 7 days.
+        Returns the number of rows deleted."""
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        stmt = delete(ProcessedEvent).where(ProcessedEvent.processed_at < cutoff)
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount

@@ -31,6 +31,7 @@ async def create_task(
     title: str,
     due_at_utc,
     channel_id: str,
+    recurrence_interval_days: int | None = None,
 ) -> Task:
     task = await TaskRepository(session, team_id).add(
         creator_slack_id=creator_slack_id,
@@ -38,6 +39,7 @@ async def create_task(
         title=title,
         due_at_utc=due_at_utc,
         channel_id=channel_id,
+        recurrence_interval_days=recurrence_interval_days,
     )
 
     reminders = ReminderRepository(session)
@@ -85,5 +87,39 @@ async def mark_task_done(
     # the last line before a DM actually goes out, for anything already
     # claimed by a worker mid-flight.
     await ReminderRepository(session).cancel_pending_for_task(task_id)
+    await session.flush()
+
+    # If this is a recurring task, create the next occurrence
+    if task.recurrence_interval_days is not None:
+        next_due_at = task.due_at_utc + timedelta(days=task.recurrence_interval_days)
+        await create_task(
+            session,
+            team_id=team_id,
+            creator_slack_id=task.creator_slack_id,
+            assignee_slack_id=task.assignee_slack_id,
+            title=task.title,
+            due_at_utc=next_due_at,
+            channel_id=task.channel_id,
+            recurrence_interval_days=task.recurrence_interval_days,
+        )
+        await session.flush()
+
+    return task
+
+
+async def reassign_task(
+    session: AsyncSession,
+    *,
+    team_id: str,
+    task_id: uuid.UUID,
+    requesting_slack_user_id: str,
+    new_assignee_slack_id: str,
+) -> Task | None:
+    task = await TaskRepository(session, team_id).get(id=task_id)
+    if task is None:
+        return None
+    if requesting_slack_user_id not in (task.assignee_slack_id, task.creator_slack_id):
+        raise TaskAuthorizationError("Only the assignee or the creator can reassign this task.")
+    task.assignee_slack_id = new_assignee_slack_id
     await session.flush()
     return task

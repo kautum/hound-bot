@@ -18,7 +18,7 @@ router = APIRouter()
 
 # Event types the in-process worker knows how to handle. Anything else is
 # acked and dropped rather than silently queued forever.
-HANDLED_EVENT_TYPES = {"app_mention"}
+HANDLED_EVENT_TYPES = {"app_mention", "app_uninstalled", "app_home_opened"}
 
 
 @router.post("/slack/events")
