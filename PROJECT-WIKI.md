@@ -17,31 +17,39 @@ that's cosmetic and low priority, not a functional gap.
 Block Kit "Book"/"Cancel" buttons on `/meet`, a friendly HTML install page + welcome DM, an
 App Home tab, and a "Mark done" button on reminder DMs. See §0.12. 193 tests passing, all
 committed and pushed — see §0.12 for how, since the local `git` binary is still broken.
+**Nothing is uncommitted; the working tree is clean.** `caffeinate` was stopped at the end of
+this session — restart it (`caffeinate -dimsu &`) if you resume overnight again.
 
 ---
 
 ## YOUR TASKS — read this first, always
 
-**One blocker left, and it's optional:**
+**Everything buildable without you is done.** What's left is genuinely yours, in the order
+that unblocks the most:
 
-1. **Re-link Google Calendar — but publish first, or it just dies again.** The refresh token
-   linked 2026-09-10 has actually expired (`invalid_grant`, confirmed live 2026-09-21) because
-   the app was never published to production — the 7-day-Testing-mode risk this file warned
-   about materialized. Order matters:
-   - Google Cloud Console → OAuth consent screen / Audience → **Publish app** first
-   - Then re-link via `/link-calendar` in Slack
-   - This only unblocks D1's last 3 steps (real freeBusy/propose/book against Google) and the
-     `/meet propose`/`book` shots in `DEMO-SHOTLIST.md`. Everything else already works.
+1. **Merge PR #1.** https://github.com/kautum/hound-bot/pull/1 — open, CI green, mergeable,
+   nothing else waiting on it. One click. (Claude couldn't do this one: merging to `main`
+   without your review is a protected action under Claude Code's auto-mode, correctly.)
+2. **Publish the Google OAuth app, then re-link — in that order.** The refresh token linked
+   2026-09-10 has expired (`invalid_grant`, confirmed live 2026-09-21) because the app was
+   never published to production. Doing it out of order (re-link before publish) just expires
+   again in 7 days.
+   - Google Cloud Console → OAuth consent screen / Audience → **Publish app**
+   - Then `/link-calendar` in Slack
+   - Only blocks: D1's last 3 steps (real freeBusy/propose/book against Google) and the
+     `/meet propose`/`book` shots in `DEMO-SHOTLIST.md`. Everything else — tasks, reminders,
+     recurring tasks, reassignment, digest, App Home, the install flow, `/meet cancel` for an
+     unbooked proposal — already works with no Google dependency.
+3. **Record the demo.** `DEMO-SHOTLIST.md` has all 10 shots, including the new UI (App Home,
+   Book/Cancel buttons, the install page). Shots 6–7 need step 2 done first; everything else
+   doesn't.
 
-**Git is no longer a blocker** — the local `git` binary is still broken (Xcode license), but
-§0.12 documents a working `dulwich` (pure-Python git) workaround that commits and pushes over
-HTTPS using the `gh` CLI's existing token, no sudo needed. **Every batch through this session
-is committed and pushed** to `worktree-slack-bot-scaffold`, and **PR #1 is open with CI green**:
-https://github.com/kautum/hound-bot/pull/1 — merge it (or ask to have it merged) once you've
-looked it over. Hosting (Render/Supabase/cron-job.org) is explicitly deferred past "finished,"
-not just parked — a demo video doesn't care whether it's recorded against localhost or a
-hosted URL. `DEMO-SHOTLIST.md` covers all 10 shots including the new UI (App Home, Book/Cancel
-buttons, install page) and is ready to record whenever you are.
+**Not on your list, and why:** hosting (Render/Supabase/cron-job.org) is deliberately deferred
+past "finished" — a demo video doesn't care whether it's recorded against localhost or a
+hosted URL, see §0.75's original reasoning. The local `git` binary is still broken (Xcode
+license) but that's no longer blocking anything — §0.12 has the `dulwich`-based workaround
+that commits and pushes without it, so there's nothing to fix here unless you want `git`
+itself working again for its own sake (`sudo xcodebuild -license accept`).
 
 ---
 
