@@ -31,6 +31,7 @@ class Task(Base):
     due_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(nullable=False, default=STATUS_OPEN)
     channel_id: Mapped[str] = mapped_column(nullable=False)
+    recurrence_interval_days: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

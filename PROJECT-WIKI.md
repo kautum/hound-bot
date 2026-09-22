@@ -13,32 +13,37 @@ the earliest mutual free slot on your calendar. Public repo:
 name (`app.*`, `slack-workplace-assistant` in `pyproject.toml`) hasn't been renamed to match —
 that's cosmetic and low priority, not a functional gap.
 
-**Last updated:** 2026-09-10, after live fire started, the build plan was rewritten and
-adversarially tested, and the work split flipped to "Devin builds, Claude judges."
+**Last updated:** 2026-09-22, after three new feature batches landed on top of everything in
+§0.10 — task reassignment, meeting cancellation, recurring tasks (with a schema migration), and
+a Block Kit interactive UI backed by a new signed `/slack/interactions` endpoint. See §0.11.
+177 tests passing. Git is still broken and nothing is committed yet.
 
 ---
 
 ## YOUR TASKS — read this first, always
 
-Slack install and Google Calendar linking are **both done** — see §0.75. Two things remain that
-only you can do:
+**Two blockers, both stop everything else, in order:**
 
-1. **Publish the Google OAuth app to "In production."** Cloud Console → OAuth consent screen /
-   Audience → **Publish app**. ~5 minutes. **Time-sensitive**: an app in "Testing" status
-   requesting sensitive scopes (ours: `calendar.freebusy`, `calendar.events`) gets 7-day refresh
-   tokens — the calendar link that works right now will silently die in a week unless this is
-   done. No verification needed to flip this switch; the only costs are an "unverified app"
-   click-through warning and a 100-user lifetime cap, both irrelevant for a supervisor demo.
-2. **Subscribe to `app_uninstalled`** in the Slack app's Event Subscriptions page. ~2 minutes.
-   Needed before the S12 fix (queued as D5, see §0.75) can be verified against real Slack.
+1. **Fix git.** Every git command on this machine currently fails with *"You have not agreed to
+   the Xcode license agreements."* This almost certainly blocks Devin too (it operates in this
+   same worktree and needs git). Run, in your own terminal:
+   ```
+   sudo xcodebuild -license accept
+   ```
+2. **Re-link Google Calendar — but publish first, or it just dies again.** The refresh token
+   linked 2026-09-10 has actually expired (`invalid_grant`, confirmed live 2026-09-21) because
+   the app was never published to production — the 7-day-Testing-mode risk this file warned
+   about materialized. Order matters:
+   - Google Cloud Console → OAuth consent screen / Audience → **Publish app** first
+   - Then re-link via `/link-calendar` in Slack
 
-**Deliberately parked, not forgotten:** Render/Supabase/cron-job.org hosting signups. Per your
-own instruction 2026-09-10, hosting/database/monitoring decisions wait until after the D0–D8
-build queue lands — no point iterating deploys against a build with known gaps. When we get
-there: GitHub Education now has real options worth comparing (§0.75) — check
-`education.github.com/pack` yourself, it's personalised and more current than any web search.
-
-**Nothing else is waiting on you** until D0–D8 finish and hosting comes back up for discussion.
+**Everything else is done or in progress without you** — see §0.10 and §0.11 for what landed,
+including a real live-database incident that was found and fully recovered from, and four new
+features (reassign, cancel, recurring tasks, Block Kit UI). Hosting (Render/Supabase/
+cron-job.org) is explicitly deferred past "finished," not just parked — a demo video doesn't
+care whether it's recorded against localhost or a hosted URL. Once you clear the two blockers
+above: everything gets committed, D1's last 3 steps run, and `DEMO-SHOTLIST.md` is ready
+whenever you want to record (it now covers the new features too).
 
 ---
 
@@ -55,15 +60,15 @@ their own workspace) is replaced by: a supervisor sees it work live, for a few m
 repo reads well. This drops Google verification, the domain, and "any workspace" scope entirely.
 
 **Real live fire happened, and it found a real bug 138 tests missed.**
-- A real Slack workspace exists now: `Devin Bot`, `team_id=T0C077J6873`. The real `xoxb-` token
+- A real Slack workspace exists now: `Devin Bot`, `team_id=<redacted>`. The real `xoxb-` token
   was verified via `auth.test` and seeded encrypted into Postgres.
-- `uvicorn` + `ngrok` running locally at `https://entrench-uphold-avert.ngrok-free.dev`, `/health`
+- `uvicorn` + `ngrok` running locally at `https://<redacted>.ngrok-free.dev`, `/health`
   green over the public internet, not just localhost.
 - **`/link-calendar` works end to end for real**: Slack → our state-issuing endpoint → Google
-  consent → our callback → `{"status":"linked","email":"kpkautum2643@gmail.com"}`.
+  consent → our callback → `{"status":"linked","email":"<redacted>@gmail.com"}`.
 - Getting there took two real fixes, both things 138 passing tests never caught because every
   test mocks the external call:
-  1. **Google's Test-User allowlist.** `kpkautum2643@gmail.com` had to be added under Cloud
+  1. **Google's Test-User allowlist.** The linking account had to be added under Cloud
      Console → Audience → Test users before Google would even show the consent screen.
   2. **A real bug: `fetch_user_email()` 401'd.** `GOOGLE_SCOPES` in `app/calendar/google_calendar.py`
      only ever requested `calendar.freebusy` and `calendar.events` — never `userinfo.email` — so
@@ -283,6 +288,180 @@ work end to end**, and before spending time debugging what might just be a missi
 4. Start the app (`uvicorn app.main:app --reload`) and `ngrok http 8000` (background)
 5. Visit `https://<the ngrok url>/slack/install` — the actual first live install, and the
    first moment any of this has touched the real internet
+
+---
+
+## 0.9. Session 2026-09-21 — git broke, token expired, plan compressed to finish faster
+
+**What happened since 2026-09-17:** the machine sat idle for 4 days. When work resumed, git
+itself was broken system-wide (`sudo xcodebuild -license accept` never got run after an apparent
+Xcode/macOS update), and the Google refresh token — never published to production despite the
+warning above being written 11 days earlier — had actually expired. Neither is a code bug; both
+are exactly the two things flagged as risks and neither got closed out in time. Recorded plainly,
+not glossed over: **a live-fire finding that gets written down but not acted on is the same as
+not finding it.**
+
+**What's confirmed done and verified, unaffected by either blocker:**
+- D0 (DB safety guard), D0.5 (CI fix, confirmed green on GitHub), D0.6 (environment resilience —
+  Postgres now runs via `brew services`, survives reboots)
+- D1 steps 1-2 (`/task add`, reminder tick) — both verified against the real DB, real reminders
+  actually sent as Slack DMs
+- D4 (Slack app manifest) — committed; caught and fixed an invalid-YAML bug from Devin's first
+  draft before it landed (an unquoted `@`-prefixed string, which YAML's parser rejects)
+- D5 (S12 `app_uninstalled` handling + S13 stopped silently marking unknown `event_type` jobs as
+  done) — fully built and test-verified (140/140 passing, lint clean) but **stuck uncommitted**
+  until git works again
+
+**The plan was compressed, not abandoned**, per explicit instruction: *"the majority of the build
+is by devin, u r just the brain and orchestrator... has taken too much time... let you build."*
+Concretely: the remaining low-risk units (D6 digest tool, D7 retention sweep, D3 README/LICENSE)
+get batched into two larger Devin dispatches instead of one-unit-at-a-time, while anything
+touching live data (D7's migration against the real seeded DB) or requiring real external calls
+(D1's remaining steps) stays exactly as careful as before. Three decisions that would previously
+have been asked as questions got decided instead, since none are load-bearing enough to justify
+another round trip: hosting deferred past "finished" (a demo video doesn't care if it's local or
+hosted), public-doc identifier redaction (keep the narrative, scrub the real email/team_id/ngrok
+host), and LICENSE = MIT. Full detail: `~/.claude/plans/alright-now-lets-glistening-yeti.md`,
+section "PLAN OF RECORD — 2026-09-21".
+
+---
+
+## 0.10. Same-day continuation, 2026-09-21 — Batch A/B landed, a real incident, D1 steps 1-2 done
+
+**Git is still broken** (`sudo xcodebuild -license accept` — even `brew install git` needs it,
+there's no way around it without your password) — nothing is committed yet, everything below
+is real, verified, and sitting on disk uncommitted.
+
+**Batch A (D6+D7) and Batch B (D3) both landed and are verified**, per the compressed plan:
+- `get_digest` registered as a 4th agent tool — zero-arg, read-only, injection boundary intact
+  (a real cross-tenant test proves it, not a tautology). Caught one real bug in Devin's own
+  work before accepting it: `/internal/tick`'s new retention sweep never called
+  `session.commit()`, so the delete would flush-then-rollback and silently no-op in production
+  outside of tests that commit manually themselves — fixed with a one-line `await
+  session.commit()` in `app/api/routes_internal.py`.
+- `processed_events` 7-day retention: migration `0008` (index + one-time cleanup), a recurring
+  sweep wired into `/internal/tick`, model/migration drift check passing. Applied to the live
+  database (see incident below — it landed there by accident before I could apply it
+  deliberately, but the schema state itself is correct).
+- README restructured (old "stranger installs it" goal removed, dead `~/.claude/plans/...`
+  link removed, "Devin's role" section rewritten with real specifics instead of vague prose),
+  LICENSE added (MIT), `PRIVACY.md` replaced with an honest one-paragraph stub — no more
+  `[BRACKETS]`. Test count filled in as 145 (real, `pytest --collect-only` fresh).
+- 145/145 tests passing, ruff clean, throughout.
+
+**A real incident happened, and it's fully recovered — recorded plainly, not glossed over.**
+Batch A's spec asked Devin to prove migration `0008` upgrades and downgrades cleanly, and told
+it to "use whatever `DATABASE_URL` is already in the environment" — `.env` in this worktree
+defaults to the **real live database**. `tests/conftest.py`'s D0 guard only intercepts
+pytest's `drop_all`; it does nothing to stop a bare `alembic downgrade base` / `upgrade head`
+run directly. Devin's verification step ran exactly that against the live DB. Result: the real
+`workspaces`, `users`, `tasks`, and every other domain table were wiped; `alembic_version` was
+left at the new head, `0008`.
+
+**Recovered, not just patched around:**
+1. Found an untouched `pg_dump` backup from 2026-09-10 (D0's original setup) still on disk.
+   Extracted just the `workspaces` and `users` rows (schemas matched exactly, no reshaping
+   needed) and inserted them directly into the live DB — the real encrypted bot token and the
+   real encrypted Google refresh token (already known-expired, so nothing new lost there) are
+   back. Everything else that was wiped (tasks, reminders, meetings, queue rows) was always
+   disposable demo/test data with no irreplaceable state.
+2. **Closed the actual hole**, not just the symptom: `alembic/env.py` now carries the same
+   guard shape `conftest.py` already had — any `alembic` invocation against a database name
+   outside `{swa_test, swa_devin, swa_migration_check}` refuses to run unless
+   `CONFIRM_LIVE_ALEMBIC=<db name>` is set explicitly for that one call. Verified: an
+   unconfirmed run against the live DB name raises immediately with a clear message; a
+   confirmed one, and any run against the test databases, proceed normally. 145/145 tests
+   still pass with this in place.
+3. This was my own spec-writing mistake, not a Devin overstep — noted so the lesson is "write
+   tighter specs for anything that could touch a real database," not "don't trust Devin more."
+
+**D1 steps 1-2 driven for real again, post-recovery, with real evidence in `LIVE-FIRE.md`:**
+signed `/task add` → real 200, real task row confirmed in Postgres; `/internal/tick` → real
+reminder DM, `sent_at` confirmed set on the real row. Also drove the new `get_digest` tool live
+through a real Groq call (not part of the original 5-step plan, but the environment was already
+up) — confirmed correct output matching the DB exactly, and incidentally found two genuine,
+non-bug Slack/LLM characteristics worth knowing about (channel membership requirement for
+`chat.postMessage`; LLM tool-routing isn't perfectly deterministic at default temperature) — both
+written up in `LIVE-FIRE.md` rather than treated as defects to chase.
+
+**D1 steps 3-5 still blocked** on the Google publish-then-relink action above — nothing changed
+there, still needs you.
+
+**D8 shot list written** (`DEMO-SHOTLIST.md`) — ready for you to record whenever, doesn't wait
+on Google (the `/meet` shots are marked optional/skippable if calendar linking isn't back yet).
+
+**What's left, in order:** you fix git and Google; I commit everything above the moment git
+works; then D1 steps 3-5; then D3.6 (re-verify the test count hasn't drifted); then you record
+D8. Hosting remains explicitly deferred, not a gate on "finished."
+
+---
+
+## 0.11. Same-day continuation, 2026-09-22 — four new features, Devin-built, Claude-judged
+
+Per explicit instruction to keep building without stopping and add more real functionality,
+three Devin dispatches landed on top of §0.10's state, each fully verified (each batch's own
+test count shown; final count below). **Still uncommitted — git is still broken.**
+
+**Batch C — task reassignment + meeting cancellation (159 tests, +14):**
+- `/task reassign <task-id> @newassignee` — `reassign_task()` mirrors `mark_task_done`'s exact
+  authorization shape (assignee or creator only). No reminder-table changes needed: the
+  scheduler already reads `task.assignee_slack_id` fresh at send-time, so a reassignment is
+  picked up automatically.
+- `/meet cancel <meeting-id>` completes the propose→book→cancel lifecycle (only propose/book
+  existed before). Added `cancel_event()` to the `CalendarProvider` interface and Google's
+  implementation (a real `events.delete` call, respx-verified at the HTTP layer). Cancelling a
+  merely-proposed meeting makes zero Google calls; cancelling a booked one actually deletes the
+  real calendar event before marking it cancelled in our DB — verified with a fake-provider
+  call-count assertion, not just a status check.
+
+**Batch D — recurring tasks (170 tests, +11 net after a fix):**
+- `/task add @user Title | <due> | repeat:7` — a nullable `recurrence_interval_days` column
+  (migration `0009`, chained after `0008`). Completing a recurring task automatically spawns
+  the next occurrence, same interval carried forward (proven by chaining a third occurrence,
+  not just a second).
+- **A real regression caught in review, not by Devin's own tests**: the parser switched from
+  `rpartition` (splits on the *last* `|` only) to a rigid `split("|")` with a hard 3-segment
+  cap, which broke any task title containing a literal `|` character (previously worked fine,
+  since the old code always treated the last pipe as the delimiter). Fixed back to
+  `rpartition`-based parsing while keeping the new `repeat:N` segment, added a dedicated
+  regression test, and corrected one of Devin's own tests that had encoded the buggy
+  three-segment-cap behavior as if it were correct.
+- Schema-migration safety note: this dispatch's own acceptance criteria required running
+  `alembic upgrade`/`downgrade` against `swa_test` — the hardened guard from §0.10 (added
+  after the earlier incident) now makes it structurally impossible for a dispatch like this to
+  accidentally hit the live database, confirm-flag or not.
+
+**Batch E — Block Kit UI + `/slack/interactions` (177 tests, +7):**
+- `/task list` now renders Slack Block Kit (a section block per task + a "Mark done" button)
+  instead of plain text — closes the README's own long-standing "Block Kit UI: not built"
+  admission.
+- New endpoint `POST /slack/interactions`, signature-verified over the raw body exactly like
+  the other two inbound endpoints (`/slack/commands`, `/slack/events`) — treated as
+  security-sensitive by design, since it's a new attack surface that triggers a real state
+  change. A button click re-runs the *exact same* `task_service.mark_task_done` authorization
+  check the `/task done` slash command already uses — no duplicated logic, no new bypass.
+  Tests prove a tampered signature 401s **and leaves the database untouched**, which is the
+  one test in this batch that actually matters most.
+- **A real, explicit rule violation caught in review**: `_send_slack_response`'s helper used
+  `except Exception: pass` — this project's own `ENGINEERING.md` and `CONTRIBUTING.md` both
+  explicitly ban `except: pass` as a non-negotiable rule, and this dispatch's code violated it
+  outright despite Devin having read both files first. Fixed to log the failure
+  (`logger.warning(..., exc_info=True)`) instead of swallowing it silently, and switched the
+  fire-and-forget call from a bare synchronous `httpx.post()` to the same
+  `async with httpx.AsyncClient(timeout=10.0)` pattern every other response_url reply in this
+  codebase already uses, for consistency. Re-verified all tests still pass after the fix
+  (`BackgroundTasks` runs async callables natively — no call-site changes needed).
+
+**Docs updated to match:** `README.md` (feature list, phase table, test count → 177),
+`DEMO-SHOTLIST.md` (new shots for the button click, recurrence, and cancellation).
+
+**Pattern worth naming plainly:** every single batch in this session — Batch A/B (§0.10) and
+C/D/E here — had at least one real, non-trivial defect that Devin's own "tests pass" claim did
+not surface, and that only turned up because every diff was read in full before being accepted,
+not skimmed. The judge-loop is not ceremony; it has now caught 8 distinct real bugs across two
+sessions of Devin dispatches, and the pattern is consistent: greenfield feature code from an
+agent still needs a human (or Claude, playing that role) to check assumptions the agent's own
+tests don't think to question.
 
 ---
 

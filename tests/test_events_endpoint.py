@@ -117,3 +117,55 @@ class TestSlackEventsEndpoint:
         result = await db_session.execute(select(InboundJob).filter_by(team_id="T99999"))
         jobs = result.scalars().all()
         assert len(jobs) == 0
+
+    async def test_app_uninstalled_is_enqueued_and_marks_workspace_uninstalled(
+        self, api_client, db_session, monkeypatch
+    ):
+        """S12: app_uninstalled events must be enqueued and processed to mark
+        the workspace as uninstalled. This test verifies the full HTTP path
+        through to the worker setting uninstalled_at."""
+        monkeypatch.setattr("app.api.routes_events.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T12345")
+
+        body = json.dumps(
+            {
+                "type": "event_callback",
+                "event_id": "Ev_APP_UNINSTALLED",
+                "team_id": "T12345",
+                "event": {"type": "app_uninstalled"},
+            }
+        ).encode()
+
+        response = await api_client.post(
+            "/slack/events", content=body, headers=_signed_headers(body, SIGNING_SECRET)
+        )
+        assert response.status_code == 200
+
+        # Verify job was enqueued
+        from sqlalchemy import select
+
+        from app.models import InboundJob
+
+        result = await db_session.execute(
+            select(InboundJob).filter_by(team_id="T12345", event_type="app_uninstalled")
+        )
+        jobs = result.scalars().all()
+        assert len(jobs) == 1
+
+        # Process the job through the worker
+        from cryptography.fernet import Fernet
+
+        from app.core.security import TokenCipher
+        from app.worker import process_one_batch
+
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await process_one_batch(db_session, cipher)
+
+        # Verify workspace.uninstalled_at is set
+        from app.models import Workspace
+
+        result = await db_session.execute(select(Workspace).filter_by(team_id="T12345"))
+        workspace = result.scalar_one_or_none()
+        assert workspace is not None
+        assert workspace.uninstalled_at is not None
