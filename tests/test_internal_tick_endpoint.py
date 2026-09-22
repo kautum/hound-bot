@@ -98,7 +98,7 @@ class TestInternalTickEndpoint:
             async def conversations_open(self, users):
                 return {"channel": {"id": "D1"}}
 
-            async def chat_postMessage(self, channel, text):
+            async def chat_postMessage(self, channel, text, blocks: list[dict] | None = None):
                 pass
 
         monkeypatch.setattr(
