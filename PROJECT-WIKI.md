@@ -18,7 +18,9 @@ Tests: 211 collected <!-- check:test-count=211 -->. Migration head: 0009 <!-- ch
 
 ## YOUR TASKS
 
-Only the owner can do these (Claude Code's auto-mode blocks agents from the first one by design).
+Only the owner can do these. Claude Code's auto-mode blocked agents from items 1 and 3 (they change
+the live database or act on the live Slack workspace and Google account), so they are left here on
+purpose.
 
 1. **Migrate the live database and restart the server.** The live DB (`slack_workplace_assistant`)
    is at migration 0008 and the code needs 0009 (`tasks.recurrence_interval_days`). The running
@@ -29,9 +31,18 @@ Only the owner can do these (Claude Code's auto-mode blocks agents from the firs
 2. **Google Calendar link.** Publish the OAuth app to "In production" (Cloud Console, Audience,
    Publish app) *before* re-linking with `/link-calendar`, or the refresh token dies again after
    7 days. See `LIVE-FIRE.md` for whether the current token is alive.
-3. **Record the demo** following `DEMO-SHOTLIST.md`, save it as `demo.mp4` at the repo root, and
+3. **Live-fire steps 3 to 5** (real Google freeBusy, `/meet` propose, `/meet` book), after items 1
+   and 2, so the server runs current code. From the repo root export `TEST_TEAM_ID`
+   (`select team_id from workspaces`), `TEST_USER_ID` (`select slack_user_id from users`) and
+   `TEST_UNLINKED_USER_ID` (any well-formed nonexistent ID, for example `UAAAAAAAAA`), then run
+   `.venv/bin/python scripts/live_fire.py --step 3`, then `--step 4`, then `--step 5 --meeting-id <id>`
+   with the id step 4 prints. Step 3 also tells you whether the Google token is alive. Afterwards run
+   `/meet cancel <id>` in Slack to delete the booked event. Paste the raw output, with IDs
+   redacted, into `LIVE-FIRE.md`. If a step fails, that is the finding; hand it to `hound-builder`.
+4. **Record the demo** following `DEMO-SHOTLIST.md`, save it as `demo.mp4` at the repo root, and
    embed it in `README.md`.
-4. **Merge the open docs/subagents PR** (agents may not merge to `main`).
+5. **Merge the open docs/subagents PR**, https://github.com/kautum/hound-bot/pull/2 (agents may not
+   merge to `main`).
 
 ## 1. Run it locally
 
