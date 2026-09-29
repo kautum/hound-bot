@@ -100,3 +100,16 @@ class TestGoogleCalendarProvider:
                     datetime(2026, 9, 7, 0, 0, tzinfo=UTC),
                     datetime(2026, 9, 8, 0, 0, tzinfo=UTC),
                 )
+
+    @respx.mock
+    async def test_cancel_event_deletes_the_event(self):
+        _mock_token_ok()
+        delete_route = respx.delete(f"{GOOGLE_EVENTS_URL}/evt_12345").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        async with httpx.AsyncClient() as http_client:
+            provider = GoogleCalendarProvider(http_client, client_id="x", client_secret="y")
+            await provider.cancel_event("refresh-token", "evt_12345")
+
+        assert delete_route.call_count == 1

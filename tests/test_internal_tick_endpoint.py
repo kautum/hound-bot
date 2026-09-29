@@ -51,7 +51,7 @@ class TestInternalTickEndpoint:
             "/internal/tick", headers={"X-Cron-Secret": "the-real-secret"}
         )
         assert response.status_code == 200
-        assert response.json() == {"reminders_sent": 0}
+        assert response.json() == {"reminders_sent": 0, "processed_events_deleted": 0}
 
     async def test_counts_actual_due_reminders(self, api_client, db_session, monkeypatch):
         """This test ensures the endpoint actually counts real due reminders,
@@ -98,7 +98,7 @@ class TestInternalTickEndpoint:
             async def conversations_open(self, users):
                 return {"channel": {"id": "D1"}}
 
-            async def chat_postMessage(self, channel, text):
+            async def chat_postMessage(self, channel, text, blocks: list[dict] | None = None):
                 pass
 
         monkeypatch.setattr(
@@ -113,4 +113,4 @@ class TestInternalTickEndpoint:
             "/internal/tick", headers={"X-Cron-Secret": "the-real-secret"}
         )
         assert response.status_code == 200
-        assert response.json() == {"reminders_sent": 1}
+        assert response.json() == {"reminders_sent": 1, "processed_events_deleted": 0}

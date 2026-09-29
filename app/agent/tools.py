@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.calendar.provider import CalendarProvider
 from app.core.security import TokenCipher
-from app.services import meeting_service, task_service
+from app.services import analytics_service, meeting_service, task_service
 
 
 @dataclass
@@ -39,6 +39,10 @@ class CreateTaskArgs(BaseModel):
 
 
 class ListTasksArgs(BaseModel):
+    pass
+
+
+class GetDigestArgs(BaseModel):
     pass
 
 
@@ -70,6 +74,10 @@ async def _handle_list_tasks(ctx: AgentContext, args: ListTasksArgs) -> str:
     if not tasks:
         return "No open tasks."
     return "\n".join(f"- {t.title} (due {t.due_at_utc.isoformat()})" for t in tasks)
+
+
+async def _handle_get_digest(ctx: AgentContext, args: GetDigestArgs) -> str:
+    return await analytics_service.build_weekly_digest(ctx.session, ctx.team_id)
 
 
 async def _handle_propose_meeting(ctx: AgentContext, args: ProposeMeetingArgs) -> str:
@@ -136,6 +144,15 @@ TOOLS: dict[str, Tool] = {
         description="List the current user's own open tasks.",
         args_model=ListTasksArgs,
         handler=_handle_list_tasks,
+    ),
+    "get_digest": Tool(
+        name="get_digest",
+        description=(
+            "Get a weekly digest of task completion rate, overdue tasks, and meetings. "
+            "The digest always covers the last 7 days regardless of when it is asked."
+        ),
+        args_model=GetDigestArgs,
+        handler=_handle_get_digest,
     ),
     "propose_meeting": Tool(
         name="propose_meeting",

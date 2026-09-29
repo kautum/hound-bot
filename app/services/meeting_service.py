@@ -15,7 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.calendar.intersection import find_earliest_slot
 from app.calendar.provider import CalendarProvider, InvalidGrantError
 from app.core.security import TokenCipher
-from app.models.meeting import STATUS_BOOKED, STATUS_PROPOSED, Meeting, MeetingParticipant
+from app.models.meeting import (
+    STATUS_BOOKED,
+    STATUS_CANCELLED,
+    STATUS_PROPOSED,
+    Meeting,
+    MeetingParticipant,
+)
 from app.repositories.user_repository import UserRepository
 
 
@@ -202,3 +208,38 @@ async def confirm_meeting(
         attendee_emails=attendee_emails,
         title=title,
     )
+
+
+async def cancel_meeting(
+    session: AsyncSession,
+    provider: CalendarProvider,
+    cipher: TokenCipher,
+    *,
+    team_id: str,
+    meeting_id: uuid.UUID,
+    requesting_slack_user_id: str,
+) -> Meeting:
+    result = await session.execute(select(Meeting).filter_by(id=meeting_id, team_id=team_id))
+    meeting = result.scalar_one_or_none()
+    if meeting is None:
+        raise MeetingConfirmationError("No meeting with that id in this workspace.")
+    if meeting.organiser_slack_id != requesting_slack_user_id:
+        raise MeetingConfirmationError("Only the meeting organiser can cancel it.")
+    if meeting.status == STATUS_CANCELLED:
+        raise MeetingConfirmationError("Meeting is already cancelled.")
+    if meeting.status == STATUS_BOOKED and meeting.google_event_id:
+        users = UserRepository(session, team_id)
+        organiser = await users.get(meeting.organiser_slack_id)
+        if (
+            organiser is None
+            or organiser.google_refresh_token_enc is None
+            or organiser.google_link_broken_at
+        ):
+            raise MeetingConfirmationError("The organiser must link a calendar before cancelling.")
+        organiser_refresh_token = cipher.decrypt(
+            organiser.google_refresh_token_enc, organiser.key_version
+        )
+        await provider.cancel_event(organiser_refresh_token, meeting.google_event_id)
+    meeting.status = STATUS_CANCELLED
+    await session.flush()
+    return meeting

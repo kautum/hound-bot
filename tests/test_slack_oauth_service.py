@@ -39,7 +39,7 @@ class TestExchangeCodeForToken:
         )
 
         async with httpx.AsyncClient() as client:
-            bot_token, team_id = await exchange_code_for_token(
+            bot_token, team_id, authed_user_id = await exchange_code_for_token(
                 client,
                 client_id="123.456",
                 client_secret="shh",
@@ -49,6 +49,7 @@ class TestExchangeCodeForToken:
 
         assert bot_token == "xoxb-fake-token"
         assert team_id == "T12345"
+        assert authed_user_id is None
 
     @respx.mock
     async def test_raises_when_slack_returns_ok_false(self):
@@ -65,6 +66,33 @@ class TestExchangeCodeForToken:
                     code="bad-code",
                     redirect_uri="https://example.ngrok-free.app/slack/oauth/callback",
                 )
+
+    @respx.mock
+    async def test_returns_authed_user_id_when_present(self):
+        respx.post(SLACK_OAUTH_ACCESS_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "access_token": "xoxb-fake-token",
+                    "team": {"id": "T12345", "name": "Test Workspace"},
+                    "authed_user": {"id": "U12345"},
+                },
+            )
+        )
+
+        async with httpx.AsyncClient() as client:
+            bot_token, team_id, authed_user_id = await exchange_code_for_token(
+                client,
+                client_id="123.456",
+                client_secret="shh",
+                code="the-code",
+                redirect_uri="https://example.ngrok-free.app/slack/oauth/callback",
+            )
+
+        assert bot_token == "xoxb-fake-token"
+        assert team_id == "T12345"
+        assert authed_user_id == "U12345"
 
     @respx.mock
     async def test_raises_on_unexpected_response_shape_rather_than_returning_garbage(self):

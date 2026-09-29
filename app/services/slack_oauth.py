@@ -45,9 +45,10 @@ async def exchange_code_for_token(
     client_secret: str,
     code: str,
     redirect_uri: str,
-) -> tuple[str, str]:
-    """Returns (bot_token, team_id). Raises SlackOAuthError on any failure —
-    never returns a plausible-looking result for a failed exchange."""
+) -> tuple[str, str, str | None]:
+    """Returns (bot_token, team_id, authed_user_id). Raises SlackOAuthError on any failure —
+    never returns a plausible-looking result for a failed exchange. authed_user_id is optional
+    and may be None if the Slack response omits it."""
     response = await http_client.post(
         SLACK_OAUTH_ACCESS_URL,
         data={
@@ -69,4 +70,5 @@ async def exchange_code_for_token(
     except KeyError as exc:
         raise SlackOAuthError(f"unexpected Slack OAuth response shape: missing {exc}") from exc
 
-    return bot_token, team_id
+    authed_user_id = body.get("authed_user", {}).get("id")
+    return bot_token, team_id, authed_user_id

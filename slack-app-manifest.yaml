@@ -7,6 +7,9 @@ features:
   bot_user:
     display_name: Hound
     always_online: false
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: false
 
 oauth_config:
   scopes:
@@ -27,6 +30,11 @@ settings:
     bot_events:
       - app_mention
       - app_uninstalled
+      - app_home_opened
+  interactivity:
+    is_enabled: true
+    # Replace YOUR-PUBLIC-BASE-URL with your actual deployment base URL
+    request_url: https://YOUR-PUBLIC-BASE-URL/slack/interactions
   org_deploy_enabled: false
   socket_mode_enabled: false
 

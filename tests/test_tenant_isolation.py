@@ -1,8 +1,9 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.fernet import Fernet
 
+from app.agent.tools import TOOLS, AgentContext, GetDigestArgs
 from app.core.security import TokenCipher
 from app.models import Workspace
 from app.repositories.task_repository import TaskRepository
@@ -112,3 +113,31 @@ class TestTenantIsolation:
         leaked = await repo_b.get("U_SAME")
         assert leaked is not None
         assert leaked.team_id == "team-A"
+
+    async def test_get_digest_tool_is_tenant_scoped(self, db_session):
+        """The get_digest tool must only return data for the requesting team,
+        never another team's tasks or meetings. This is enforced by the tool
+        reading team_id from AgentContext, never from model arguments."""
+        await _make_workspace(db_session, "team-A")
+        await _make_workspace(db_session, "team-B")
+
+        # Create an overdue task in team-A
+        repo_a = TaskRepository(db_session, team_id="team-A")
+        await repo_a.add(
+            creator_slack_id="U1",
+            assignee_slack_id="U1",
+            title="Team A task",
+            due_at_utc=datetime.now(UTC) - timedelta(days=1),  # Make it overdue
+            channel_id="C1",
+        )
+        await db_session.commit()
+
+        # Team A's digest should show 1 overdue task
+        ctx_a = AgentContext(session=db_session, team_id="team-A", slack_user_id="U1")
+        digest_a = await TOOLS["get_digest"].handler(ctx_a, GetDigestArgs())
+        assert "Overdue tasks: 1" in digest_a
+
+        # Team B's digest should show 0 overdue tasks (team A's task doesn't leak)
+        ctx_b = AgentContext(session=db_session, team_id="team-B", slack_user_id="U2")
+        digest_b = await TOOLS["get_digest"].handler(ctx_b, GetDigestArgs())
+        assert "Overdue tasks: 0" in digest_b

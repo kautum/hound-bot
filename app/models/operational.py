@@ -8,7 +8,7 @@ both the Slack install flow and the Google account-linking flow.
 
 from datetime import datetime
 
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -19,6 +19,7 @@ PURPOSE_GOOGLE_LINK = "google_link"
 
 class ProcessedEvent(Base):
     __tablename__ = "processed_events"
+    __table_args__ = (Index("ix_processed_events_processed_at", "processed_at"),)
 
     event_id: Mapped[str] = mapped_column(primary_key=True)
     team_id: Mapped[str] = mapped_column(nullable=False)

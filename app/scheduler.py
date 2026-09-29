@@ -10,6 +10,7 @@ from app.models.task import STATUS_OPEN, Task
 from app.repositories.reminder_repository import ReminderRepository
 from app.repositories.workspace_repository import WorkspaceRepository
 from app.services.task_service import ESCALATION_LEVEL_OVERDUE
+from app.ui.blocks import _build_task_block
 
 
 def _reminder_text(escalation_level: int, task: Task) -> str:
@@ -50,7 +51,9 @@ async def process_due_reminders(session, cipher: TokenCipher) -> int:
 
         for slack_user_id in recipients:
             dm = await client.conversations_open(users=slack_user_id)
-            await client.chat_postMessage(channel=dm["channel"]["id"], text=text)
+            await client.chat_postMessage(
+                channel=dm["channel"]["id"], text=text, blocks=_build_task_block(task)
+            )
 
         await repo.mark_sent(reminder.id)
         await session.commit()

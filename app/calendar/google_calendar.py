@@ -186,3 +186,11 @@ class GoogleCalendarProvider:
             raise GoogleOAuthError(
                 f"unexpected events.insert response shape: missing {exc}"
             ) from exc
+
+    async def cancel_event(self, refresh_token: str, event_id: str) -> None:
+        access_token = await self._access_token(refresh_token)
+        delete_url = f"{GOOGLE_EVENTS_URL}/{event_id}"
+        response = await self._http_client.delete(
+            delete_url, headers={"Authorization": f"Bearer {access_token}"}
+        )
+        response.raise_for_status()

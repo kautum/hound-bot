@@ -10,14 +10,14 @@ from app.services.task_service import create_task
 class FakeSlackClient:
     def __init__(self):
         self.dm_opens: list[str] = []
-        self.posted: list[tuple[str, str]] = []
+        self.posted: list[tuple[str, str, list[dict]]] = []
 
     async def conversations_open(self, users: str):
         self.dm_opens.append(users)
         return {"channel": {"id": f"DM-{users}"}}
 
-    async def chat_postMessage(self, channel: str, text: str):
-        self.posted.append((channel, text))
+    async def chat_postMessage(self, channel: str, text: str, blocks: list[dict] | None = None):
+        self.posted.append((channel, text, blocks or []))
 
 
 async def _make_workspace_with_real_token(session, team_id: str, cipher) -> None:
@@ -45,7 +45,7 @@ class TestProcessDueReminders:
 
         # Due 25h ago, so create_task's overdue reminder (+24h) is already due now.
         due = datetime.now(UTC) - timedelta(hours=25)
-        await create_task(
+        task = await create_task(
             db_session,
             team_id="team-A",
             creator_slack_id="U_CREATOR",
@@ -71,6 +71,67 @@ class TestProcessDueReminders:
         assert fake_client.dm_opens.count("U_ASSIGNEE") == 2  # notified by both reminders
         assert fake_client.dm_opens.count("U_CREATOR") == 1  # only the overdue one notifies them
         assert len(fake_client.posted) == 3
+
+        # Verify all messages include blocks with task title and "Mark done" button
+        for _channel, _text, blocks in fake_client.posted:
+            assert len(blocks) == 2  # section + actions
+            section = blocks[0]
+            assert section["type"] == "section"
+            assert "Overdue thing" in section["text"]["text"]
+            actions = blocks[1]
+            assert actions["type"] == "actions"
+            button = actions["elements"][0]
+            assert button["action_id"] == "task_done"
+            assert button["text"]["text"] == "Mark done"
+            assert button["value"] == str(task.id)
+
+    async def test_due_soon_reminder_includes_blocks_with_mark_done_button(
+        self, db_session, monkeypatch
+    ):
+        from app.core.security import TokenCipher
+
+        key = Fernet.generate_key().decode()
+        cipher = TokenCipher(keys={1: key}, current_version=1)
+        await _make_workspace_with_real_token(db_session, "team-A", cipher)
+
+        # Due 1h ago, so the "due today" reminder (fires at due_at) is due,
+        # but the "overdue" reminder (due_at + 24h) is still in the future.
+        due = datetime.now(UTC) - timedelta(hours=1)
+        task = await create_task(
+            db_session,
+            team_id="team-A",
+            creator_slack_id="U_CREATOR",
+            assignee_slack_id="U_ASSIGNEE",
+            title="Due soon thing",
+            due_at_utc=due,
+            channel_id="C1",
+        )
+        await db_session.commit()
+
+        fake_client = FakeSlackClient()
+        monkeypatch.setattr(
+            "app.scheduler.build_client_for_workspace", lambda workspace, cipher: fake_client
+        )
+
+        sent = await process_due_reminders(db_session, cipher)
+
+        assert sent == 1
+        assert fake_client.dm_opens.count("U_ASSIGNEE") == 1
+        assert fake_client.dm_opens.count("U_CREATOR") == 0  # not overdue, so creator not notified
+        assert len(fake_client.posted) == 1
+
+        # Verify the message includes blocks with task title and "Mark done" button
+        _channel, _text, blocks = fake_client.posted[0]
+        assert len(blocks) == 2  # section + actions
+        section = blocks[0]
+        assert section["type"] == "section"
+        assert "Due soon thing" in section["text"]["text"]
+        actions = blocks[1]
+        assert actions["type"] == "actions"
+        button = actions["elements"][0]
+        assert button["action_id"] == "task_done"
+        assert button["text"]["text"] == "Mark done"
+        assert button["value"] == str(task.id)
 
     async def test_uninstalled_workspace_reminders_are_marked_sent_without_posting(
         self, db_session, monkeypatch

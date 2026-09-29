@@ -25,6 +25,8 @@ from app.models.inbound_job import InboundJob
 from app.repositories.inbound_job_repository import InboundJobRepository
 from app.repositories.workspace_repository import WorkspaceRepository
 from app.services import meeting_service
+from app.services.task_service import list_open_tasks
+from app.ui.blocks import build_app_home_view, build_meeting_action_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -117,12 +119,15 @@ async def handle_meet_propose(
     payload = job.payload
     response_url = payload.get("response_url", "")
 
-    async def _respond(text: str) -> None:
+    async def _respond(text: str, blocks: list[dict] | None = None) -> None:
         if not response_url:
             logger.warning("meet_propose job %s has no response_url to reply to", job.id)
             return
+        payload = {"response_type": "ephemeral", "text": text}
+        if blocks:
+            payload["blocks"] = blocks
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(response_url, json={"response_type": "ephemeral", "text": text})
+            await client.post(response_url, json=payload)
 
     if not (settings.google_client_id and settings.google_client_secret):
         await _respond("Calendar scheduling isn't configured on this workspace yet.")
@@ -164,9 +169,13 @@ async def handle_meet_propose(
         names = ", ".join(f"<@{p}>" for p in result.unavailable_participants)
         note = f"\n(Couldn't check {names} — not linked yet: `/link-calendar`)"
 
+    blocks = build_meeting_action_blocks(
+        meeting_id=str(result.meeting.id), action_id="meet_book", button_text="Book"
+    )
     await _respond(
         f"Earliest mutual slot: {result.slot_start_utc.isoformat()} UTC, "
-        f"{duration_minutes} min. Run `/meet book {result.meeting.id}` to book it.{note}"
+        f"{duration_minutes} min.{note}",
+        blocks=blocks,
     )
 
 
@@ -178,12 +187,15 @@ async def handle_meet_book(session: AsyncSession, job: InboundJob, cipher: Token
     payload = job.payload
     response_url = payload.get("response_url", "")
 
-    async def _respond(text: str) -> None:
+    async def _respond(text: str, blocks: list[dict] | None = None) -> None:
         if not response_url:
             logger.warning("meet_book job %s has no response_url to reply to", job.id)
             return
+        payload = {"response_type": "ephemeral", "text": text}
+        if blocks:
+            payload["blocks"] = blocks
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(response_url, json={"response_type": "ephemeral", "text": text})
+            await client.post(response_url, json=payload)
 
     if not (settings.google_client_id and settings.google_client_secret):
         await _respond("Calendar scheduling isn't configured on this workspace yet.")
@@ -210,13 +222,87 @@ async def handle_meet_book(session: AsyncSession, job: InboundJob, cipher: Token
             return
 
     await session.commit()
-    await _respond(f"Booked for {meeting.proposed_start_utc.isoformat()} UTC.")
+    blocks = build_meeting_action_blocks(
+        meeting_id=str(meeting.id), action_id="meet_cancel", button_text="Cancel"
+    )
+    await _respond(f"Booked for {meeting.proposed_start_utc.isoformat()} UTC.", blocks=blocks)
+
+
+async def handle_meet_cancel(session: AsyncSession, job: InboundJob, cipher: TokenCipher) -> None:
+    """Cancelling a booked meeting makes a Google events.delete call —
+    enqueued for the same 3-second budget reason as book/propose."""
+    payload = job.payload
+    response_url = payload.get("response_url", "")
+
+    async def _respond(text: str) -> None:
+        if not response_url:
+            logger.warning("meet_cancel job %s has no response_url to reply to", job.id)
+            return
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(response_url, json={"response_type": "ephemeral", "text": text})
+
+    if not (settings.google_client_id and settings.google_client_secret):
+        await _respond("Calendar scheduling isn't configured on this workspace yet.")
+        return
+
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        provider = GoogleCalendarProvider(
+            http_client,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
+        try:
+            await meeting_service.cancel_meeting(
+                session,
+                provider,
+                cipher,
+                team_id=job.team_id,
+                meeting_id=uuid.UUID(payload["meeting_id"]),
+                requesting_slack_user_id=payload["requesting_user_id"],
+            )
+        except meeting_service.MeetingConfirmationError as exc:
+            await _respond(str(exc))
+            return
+
+    await session.commit()
+    await _respond("Cancelled that meeting.")
+
+
+async def handle_app_uninstalled(
+    session: AsyncSession, job: InboundJob, cipher: TokenCipher
+) -> None:
+    """Handles app_uninstalled events by marking the workspace as uninstalled.
+    This is a workspace-level event (not per-user tokens_revoked)."""
+    await WorkspaceRepository(session).mark_uninstalled(job.team_id)
+
+
+async def handle_app_home_opened(
+    session: AsyncSession, job: InboundJob, cipher: TokenCipher
+) -> None:
+    """Handles app_home_opened events by publishing the user's open tasks
+    to the App Home tab. Refreshed every time they open the tab."""
+    workspace = await WorkspaceRepository(session).get(job.team_id)
+    if workspace is None or workspace.uninstalled_at is not None:
+        return
+
+    client = build_client_for_workspace(workspace, cipher)
+    user_id = job.payload["user"]
+
+    tasks = await list_open_tasks(
+        session, team_id=job.team_id, assignee_slack_id=user_id
+    )
+    view = build_app_home_view(tasks)
+
+    await client.views_publish(user_id=user_id, view=view)
 
 
 HANDLERS: dict[str, Callable[[AsyncSession, InboundJob, TokenCipher], Awaitable[None]]] = {
     "app_mention": handle_app_mention,
     "meet_propose": handle_meet_propose,
     "meet_book": handle_meet_book,
+    "meet_cancel": handle_meet_cancel,
+    "app_uninstalled": handle_app_uninstalled,
+    "app_home_opened": handle_app_home_opened,
 }
 
 
@@ -228,6 +314,12 @@ async def process_one_batch(session: AsyncSession, cipher: TokenCipher) -> int:
         try:
             if handler is not None:
                 await handler(session, job, cipher)
+            else:
+                error_msg = f"no handler registered for event_type {job.event_type!r}"
+                logger.error("job %s failed: %s", job.id, error_msg)
+                await repo.mark_failed(job.id, error_msg)
+                await session.commit()
+                continue
             await repo.mark_done(job.id)
         except Exception as exc:  # noqa: BLE001 — one bad job must not kill the worker loop
             logger.exception("job %s failed", job.id)
