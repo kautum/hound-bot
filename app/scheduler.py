@@ -1,5 +1,6 @@
 """Drains due reminders — triggered by the `/internal/tick` endpoint in prod
-(cron-job.org, every 5 min) or a local polling loop in dev. See
+(cron-job.org, every 5 min); in dev, POST /internal/tick manually. There is no
+polling loop; reminders are drained only by that endpoint. See
 ARCHITECTURE.md's job queue section and Part 0.5's decided chasing behaviour:
 DM the assignee on the way to the deadline; when overdue, also DM the creator.
 """
