@@ -56,7 +56,7 @@ slash commands) needs a real workspace to build against.
 
 ## Gate 0.3 — Google Cloud project + the verification probe
 
-**Why:** `calendar.freebusy` and `calendar.events` are sensitive scopes. Until Google
+**Why:** The calendar.freebusy and calendar.events scopes are sensitive. Until Google
 verifies the app, refresh tokens expire after 7 days — the calendar feature would work
 perfectly through the build, then silently die a week later. We need to know now whether
 verification is realistic, or whether we're deliberately accepting the 7-day/100-user
@@ -67,7 +67,8 @@ Testing limits for a portfolio demo.
 2. **APIs & Services → Library** → enable **Google Calendar API**.
 3. **APIs & Services → OAuth consent screen**:
    - User type: **External**
-   - Add scopes: `.../auth/calendar.freebusy` and `.../auth/calendar.events`
+   - Add scopes: calendar.freebusy, calendar.events and userinfo.email (the last is non-sensitive;
+     the code requests all three)
    - Fill in the minimum required fields (app name, support email, developer contact)
 4. **Try to publish**: look for the button to move from "Testing" to "In production".
    Click it (or as far as it lets you go) and read exactly what Google demands —
@@ -112,7 +113,8 @@ on its own (which is what the plan currently assumes).
 **Why:** Thirty free minutes seeing a bot say "hi" demystifies the whole project before
 any real architecture gets built. This is the one gate we do together, live — come back
 once 0.2 is done and we'll write the ~30 lines together using Socket Mode (no public URL
-needed for this throwaway version).
+needed for this throwaway version). The Socket Mode hello-world is historical; the app itself
+uses HTTP endpoints only.
 
 **Depends on:** Gate 0.2 (needs the Slack app's Bot Token and Signing Secret).
 

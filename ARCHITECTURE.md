@@ -46,7 +46,7 @@ flowchart TB
     end
 
     subgraph OURS["One service — Render free tier"]
-        WEB["FastAPI + Bolt<br/>verify signature, ack in under 3s"]
+        WEB["FastAPI<br/>verify signature, ack in under 3s"]
         WORKER["In-process worker<br/>asyncio background task"]
     end
 
@@ -78,23 +78,26 @@ cost a real bug. `/task` and `/link-calendar` are pure DB reads/writes with no n
 so answering inline within the request is correct. `/meet`'s propose path makes one real Google
 API call *per participant*; it enqueues an `inbound_jobs` row (`event_type="meet_propose"`) and
 acks immediately, and the worker's `handle_meet_propose` posts the real answer to Slack's
-`response_url` once it's done (valid for 30 minutes after the original command). The first
+`response_url` once it's done. `/meet book` and `/meet cancel` enqueue too (`meet_book`,
+`meet_cancel`), and so do the "Book" and "Cancel" buttons, which enqueue the same jobs (valid for 30 minutes after the original command). The first
 version of `/meet` called Google synchronously inside the request handler — it worked in every
 test because tests don't have Slack's 3-second clock running, and would have silently timed out
 in production the first time someone proposed a meeting with more than one or two participants.
 **Any new command that makes a network call needs to ask this question before it ships:** could
 this exceed 3 seconds with a slow network or a few extra participants? If yes, enqueue it.
 
-**The cron tick does two jobs with one mechanism.** It drains the reminders/jobs table (the
-scheduler's job) and it keeps Render's free service from spinning down after 15 minutes of
+**The cron tick does two jobs with one mechanism.** It drains due reminders and sweeps
+old `processed_events` rows (the scheduler's job; `inbound_jobs` are drained separately by the
+in-process worker) and it keeps Render's free service from spinning down after 15 minutes of
 idle, which would otherwise turn every cold request into a 30–60s stall that blows the 3-second
 budget. Reminder precision is therefore ±5 minutes — acceptable for "your report is due
 tomorrow", and stated as a real product property, not hidden as an implementation detail.
 
-**Local dev needs a public HTTPS tunnel too, not just Socket Mode.** Socket Mode covers inbound
-*events* without a public URL, but Slack's OAuth redirect URL must be HTTPS even in
-development — Google exempts `http://localhost`, Slack does not. Run `ngrok http 8000` and
-register that URL as the dev Slack app's OAuth redirect. Dev and prod are **separate Slack
+**Local dev needs a public HTTPS tunnel.** Socket Mode is not used (the manifest sets
+`socket_mode_enabled: false`); Slack delivers events, commands and interactions over HTTP, and
+its OAuth redirect URL must be HTTPS even in development — Google exempts `http://localhost`,
+Slack does not. Run `ngrok http 8000` and register that URL as the dev Slack app's OAuth
+redirect. Dev and prod are **separate Slack
 apps** with separate redirect URIs — swapping one for the other is the most common cause of a
 `redirect_uri_mismatch` error.
 
@@ -135,11 +138,13 @@ erDiagram
         timestamp uninstalled_at
     }
     USERS {
+        string team_id PK, FK
         string slack_user_id PK
-        string team_id FK
         string tz
         bytes google_refresh_token_enc
         int key_version
+        timestamp google_link_broken_at
+        string google_email
     }
     TASKS {
         uuid id PK
@@ -150,6 +155,8 @@ erDiagram
         timestamp due_at_utc
         string status
         string channel_id
+        int recurrence_interval_days
+        timestamp created_at
     }
     REMINDERS {
         uuid id PK
@@ -157,6 +164,7 @@ erDiagram
         string team_id FK
         timestamp fire_at_utc
         timestamp sent_at
+        timestamp claimed_at
         int escalation_level
     }
     MEETINGS {
@@ -166,16 +174,21 @@ erDiagram
         int duration_min
         string status
         string google_event_id
+        timestamp created_at
+        timestamp proposed_start_utc
     }
     MEETING_PARTICIPANTS {
-        uuid meeting_id FK
+        uuid meeting_id PK, FK
+        string slack_user_id PK
         string team_id FK
-        string slack_user_id FK
     }
 ```
 
-Plus two operational tables: `processed_events` (dedupe Slack retries by `event_id`) and
-`oauth_states` (pending OAuth state with a TTL).
+Plus three operational tables: `processed_events` (dedupe Slack retries by `event_id`),
+`oauth_states` (pending OAuth state with a TTL) and `inbound_jobs` (the ack-and-enqueue job
+queue the in-process worker drains). `users` has a composite primary key `(team_id,
+slack_user_id)`, and `meeting_participants` has a composite foreign key `(team_id,
+slack_user_id)` to it.
 
 **Two rules enforced in the data-access layer, never left for a call site to remember:**
 
@@ -199,8 +212,11 @@ field. Unit 4.6 (slot proposal + book-on-click) is what writes these rows.
   re-serialised JSON — that produces different bytes and silently breaks the check), with a
   5-minute timestamp window against replay, using constant-time comparison.
 - **The LLM only ever picks a whitelisted, Pydantic-validated tool.** It never touches the
-  database directly, never supplies its own `team_id` (the server injects it), and destructive
-  actions require a human confirmation click. A prompt injection can make the model *choose*
+  database directly, never supplies its own `team_id` (the server injects it), and has no
+  destructive tools (there is no book or cancel tool; the agent can only create tasks, list
+  tasks, propose meetings and produce a digest). There is no confirmation step on the human
+  paths either: `/meet book <id>`, `/meet cancel <id>` and the Book and Cancel buttons act
+  when invoked (cancel is organiser-only). A prompt injection can make the model *choose*
   the wrong tool call; it can never expand what tools exist or what they're allowed to do.
 - **Secrets are tiered.** App-level secrets (`SLACK_SIGNING_SECRET`, `GROQ_API_KEY`, etc.) live
   in environment variables. Per-tenant secrets (bot tokens, Google refresh tokens) are Fernet-
@@ -224,7 +240,7 @@ Two file-disjoint tracks, so parallel work never merge-conflicts:
 | Track | Directories |
 |---|---|
 | **Domain (Claude)** | `app/core/`, `app/models/`, `app/repositories/`, `app/services/`, `app/agent/`, `alembic/` |
-| **Infrastructure (Devin)** | `tests/`, `.github/`, `app/ui/blocks/`, `app/observability/`, `Dockerfile`, `render.yaml` |
+| **Infrastructure (Devin)** | `tests/`, `.github/`, `app/ui/blocks.py`, `Dockerfile`, `render.yaml` (an observability package is not built) |
 
 See `CONTRIBUTING.md` for the task template any autonomous agent should be given, and for what
 never to touch without asking.

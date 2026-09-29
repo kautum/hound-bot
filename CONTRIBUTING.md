@@ -15,12 +15,12 @@ sections, ask for it rather than guessing:
 Context:   Read ARCHITECTURE.md first.
 Goal:      <one sentence>
 Touch:     <explicit file/directory list>
-Accept:    <machine-checkable — e.g. `pytest tests/scheduling` passes, `/health` returns 200>
+Accept:    <machine-checkable — e.g. `pytest tests/test_scheduler.py` passes, `/health` returns 200 (it returns 503 if the worker has not polled recently)>
 Do NOT:    touch app/core/, change the schema, or add dependencies without noting why
 ```
 
-**Stay inside the Infrastructure track** (`tests/`, `.github/`, `app/ui/blocks/`,
-`app/observability/`, `Dockerfile`, `render.yaml`) unless a task explicitly says otherwise. The
+**Stay inside the Infrastructure track** (`tests/`, `.github/`, `app/ui/blocks.py`,
+`Dockerfile`, `render.yaml`; an observability package is not built) unless a task explicitly says otherwise. The
 Domain track (`app/core/`, `app/models/`, `app/repositories/`, `app/services/`, `app/agent/`,
 `alembic/`) is scoped separately, on purpose, so parallel work doesn't merge-conflict.
 
