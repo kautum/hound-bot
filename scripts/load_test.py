@@ -1,31 +1,70 @@
 #!/usr/bin/env python3
-"""Load test for Slack endpoints, verifying 3-second ack budget under concurrency.
+"""Load test for the Slack endpoints, verifying the 3-second ack budget under concurrency.
 
-Exits 0 if p95 < 3000ms, 1 otherwise. Uses a separate database (swa_devin) to avoid
-interfering with other processes. Requires the app's database schema to exist in swa_devin.
+Runs the app in-process (httpx ASGITransport) against the throwaway database swa_devin and
+exercises the REAL ack paths. A request from a team with no installed workspace is rejected
+early, so this script first seeds one installed workspace for its own test team, then fires:
+
+  * N signed `/task add` commands  (each inserts a task plus its reminders), then
+  * N signed `app_mention` events  (each has a distinct event_id and enqueues an inbound job),
+
+a 1:1 ratio, each phase with N requests in flight at once. Afterwards it checks the database:
+every request must return 200, tasks created must equal successful /task add responses, and
+jobs created must equal successful events. The rows it wrote are removed at the end.
+
+Exits 0 only if all checks pass and p95 < 3000ms for both endpoints, 1 otherwise.
+
+Keep --concurrent at or below 100. Above about 100 concurrent connections the httpx client
+itself becomes the bottleneck and inflates the measured latency (measured), so the numbers
+stop describing the server. The default stays 50.
+
+Hard guard: refuses to run against any database other than swa_devin. The schema is created
+with Base.metadata.create_all (fine for this throwaway DB; alembic is not involved).
 """
 
+import argparse
 import asyncio
 import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import time
+import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 # Add parent directory to path so we can import app
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import httpx
 
-# Override DATABASE_URL to use the separate test database
-os.environ["DATABASE_URL"] = "postgresql+asyncpg://kpkautum@localhost:5432/swa_devin"
+ALLOWED_DB_NAME = "swa_devin"
+# Set before the app is imported: environment variables win over .env in Settings.
+os.environ["DATABASE_URL"] = f"postgresql+asyncpg://kpkautum@localhost:5432/{ALLOWED_DB_NAME}"
 
 SIGNING_SECRET = "test-signing-secret"
+os.environ["SLACK_SIGNING_SECRET"] = SIGNING_SECRET
+
+TEST_TEAM_ID = "TLOADTEST1"
+TEST_USER_ID = "ULOADTEST1"
+TEST_CHANNEL_ID = "CLOADTEST1"
+THRESHOLD_MS = 3000
 
 
-def _signed_headers(body, secret, timestamp=None):
+def _assert_safe_database(database_url: str) -> None:
+    """Refuse to run (and to delete rows) anywhere but swa_devin."""
+    match = re.search(r"/([^/?]+)(?:\?|$)", database_url)
+    db_name = match.group(1) if match else None
+    if db_name != ALLOWED_DB_NAME:
+        raise RuntimeError(
+            f"Refusing to load-test against database {db_name!r}; only {ALLOWED_DB_NAME!r}."
+        )
+
+
+def _signed_headers(body, secret, content_type, timestamp=None):
     """Mirrors Slack's documented HMAC signing scheme."""
     ts = timestamp or str(int(time.time()))
     basestring = f"v0:{ts}:".encode() + body
@@ -33,66 +72,50 @@ def _signed_headers(body, secret, timestamp=None):
     return {
         "X-Slack-Request-Timestamp": ts,
         "X-Slack-Signature": f"v0={digest}",
-        "Content-Type": "application/json",
+        "Content-Type": content_type,
     }
 
 
-def _signed_form_headers(form_data: dict, secret: str) -> dict:
-    """Signed headers for form-encoded slash command requests."""
-    # Slack signs the raw form body as UTF-8 bytes
-    form_str = "&".join(f"{k}={v}" for k, v in form_data.items())
-    body = form_str.encode("utf-8")
-    return _signed_headers(body, secret)
+async def _timed_post(client, path, body, content_type):
+    """POST a signed body; return (latency_ms, status_code). A transport error is status 0."""
+    headers = _signed_headers(body, SIGNING_SECRET, content_type)
+    start = time.perf_counter()
+    try:
+        response = await client.post(path, content=body, headers=headers)
+        status = response.status_code
+    except httpx.HTTPError:
+        status = 0
+    return (time.perf_counter() - start) * 1000, status
 
 
-async def _ensure_test_workspace(client):
-    """Create a test workspace in the database if it doesn't exist."""
-    # This is a no-op for the load test - we're testing endpoint latency,
-    # not correctness. The endpoints will fail auth but still ack quickly.
-    pass
-
-
-async def _fire_events_request(client):
-    """Fire a single /slack/events request and return latency in ms."""
+async def _fire_events_request(client, run_id, index):
+    """One signed app_mention event with a distinct event_id (enqueues an inbound job)."""
     body = json.dumps(
         {
             "type": "event_callback",
-            "event_id": f"Ev_{time.time_ns()}",
-            "team_id": "T12345",
-            "event": {"type": "app_mention", "channel": "C1", "text": "hi"},
+            "event_id": f"EvLoad_{run_id}_{index}",
+            "team_id": TEST_TEAM_ID,
+            "event": {"type": "app_mention", "channel": TEST_CHANNEL_ID, "text": "hi"},
         }
     ).encode()
-
-    start = time.perf_counter()
-    response = await client.post(
-        "/slack/events", content=body, headers=_signed_headers(body, SIGNING_SECRET)
-    )
-    elapsed_ms = (time.perf_counter() - start) * 1000
-
-    # We expect 401 (invalid signature due to no workspace) or 200,
-    # but the latency is what matters, not the response code.
-    return elapsed_ms
+    return await _timed_post(client, "/slack/events", body, "application/json")
 
 
-async def _fire_commands_request(client):
-    """Fire a single /slack/commands request and return latency in ms."""
+async def _fire_commands_request(client, run_id, index):
+    """One signed `/task add` command with a distinct trigger_id (inserts a task)."""
+    due = (datetime.now(UTC) + timedelta(days=7)).replace(microsecond=0).isoformat()
     form_data = {
         "command": "/task",
-        "text": "list",
-        "team_id": "T12345",
-        "user_id": "U12345",
-        "channel_id": "C12345",
+        "text": f"add <@{TEST_USER_ID}> load test task {index} | {due}",
+        "team_id": TEST_TEAM_ID,
+        "user_id": TEST_USER_ID,
+        "channel_id": TEST_CHANNEL_ID,
+        "trigger_id": f"TrLoad_{run_id}_{index}",
     }
-
-    start = time.perf_counter()
-    response = await client.post(
-        "/slack/commands",
-        data=form_data,
-        headers=_signed_form_headers(form_data, SIGNING_SECRET),
+    body = urlencode(form_data).encode("utf-8")
+    return await _timed_post(
+        client, "/slack/commands", body, "application/x-www-form-urlencoded"
     )
-    elapsed_ms = (time.perf_counter() - start) * 1000
-
-    return elapsed_ms
 
 
 def _percentiles(data: list) -> dict:
@@ -109,73 +132,153 @@ def _percentiles(data: list) -> dict:
     }
 
 
-async def run_load_test(concurrent_requests=50):
-    """Run load test against both endpoints concurrently.
+async def _prepare_database(engine) -> bool:
+    """Create the schema, clear leftovers from a crashed run, and seed one installed
+    workspace for the test team if absent. Returns True if this call created it."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    Returns (events_percentiles, commands_percentiles).
+    from app.models import Base, Workspace
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    await _delete_test_rows(engine, include_workspace=False)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        existing = await session.scalar(
+            select(Workspace).where(Workspace.team_id == TEST_TEAM_ID)
+        )
+        if existing is not None:
+            return False
+        session.add(
+            Workspace(
+                team_id=TEST_TEAM_ID,
+                bot_token_enc=b"load-test-not-a-real-token",
+                key_version=1,
+                installed_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+        return True
+
+
+async def _delete_test_rows(engine, include_workspace: bool) -> None:
+    """Delete only rows belonging to the test team, children before the workspace."""
+    from sqlalchemy import delete
+
+    from app.models import InboundJob, ProcessedEvent, Reminder, Task, User, Workspace
+
+    tables = [Reminder, Task, InboundJob, ProcessedEvent, User]
+    if include_workspace:
+        tables.append(Workspace)
+    async with engine.begin() as conn:
+        for model in tables:
+            await conn.execute(delete(model).where(model.team_id == TEST_TEAM_ID))
+
+
+async def _count_rows(engine) -> dict:
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.models import InboundJob, Task
+
+    async with async_sessionmaker(engine)() as session:
+        tasks = await session.scalar(
+            select(func.count()).select_from(Task).where(Task.team_id == TEST_TEAM_ID)
+        )
+        jobs = await session.scalar(
+            select(func.count())
+            .select_from(InboundJob)
+            .where(InboundJob.team_id == TEST_TEAM_ID)
+        )
+    return {"tasks": tasks, "jobs": jobs}
+
+
+async def run_load_test(concurrent_requests=50) -> dict:
+    """Seed, fire N commands then N events, verify against the DB, clean up.
+
+    Returns the raw results for main() to report and judge.
     """
-    # httpx is already a dev dependency in pyproject.toml, no new dependency needed
-    # Import app after DATABASE_URL is set
+    _assert_safe_database(os.environ["DATABASE_URL"])
+    from app.core.db import engine
     from app.main import app
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        await _ensure_test_workspace(client)
+    created_workspace = await _prepare_database(engine)
+    run_id = uuid.uuid4().hex[:8]
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            commands = await asyncio.gather(
+                *[_fire_commands_request(client, run_id, i) for i in range(concurrent_requests)]
+            )
+            events = await asyncio.gather(
+                *[_fire_events_request(client, run_id, i) for i in range(concurrent_requests)]
+            )
+        counts = await _count_rows(engine)
+    finally:
+        await _delete_test_rows(engine, include_workspace=created_workspace)
+        await engine.dispose()
 
-        # Fire concurrent requests to /slack/events
-        events_latencies = await asyncio.gather(
-            *[_fire_events_request(client) for _ in range(concurrent_requests)]
-        )
+    return {"commands": commands, "events": events, "counts": counts}
 
-        # Fire concurrent requests to /slack/commands
-        commands_latencies = await asyncio.gather(
-            *[_fire_commands_request(client) for _ in range(concurrent_requests)]
-        )
 
-    return (
-        _percentiles(events_latencies),
-        _percentiles(commands_latencies),
-    )
+def _report(name: str, results: list) -> tuple[float, int]:
+    """Print latency stats for one endpoint; return (p95, number of 200 responses)."""
+    pct = _percentiles([latency for latency, _ in results])
+    print(f"\n=== {name} ===")
+    for key in ("p50", "p95", "p99", "max"):
+        print(f"{key}: {pct[key]:.2f}ms")
+    return pct["p95"], sum(1 for _, status in results if status == 200)
 
 
 def main():
     """Run load test and print results, exiting with appropriate code."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Load test Slack endpoints for 3-second ack budget")
+    parser = argparse.ArgumentParser(
+        description="Load test Slack endpoints for 3-second ack budget"
+    )
     parser.add_argument(
         "-n",
         "--concurrent",
         type=int,
         default=50,
-        help="Number of concurrent requests per endpoint (default: 50)",
+        help="Number of concurrent requests per endpoint (default: 50; keep <= 100)",
     )
     args = parser.parse_args()
+    n = args.concurrent
 
-    print(f"Running load test with {args.concurrent} concurrent requests per endpoint...")
-    events_pct, commands_pct = asyncio.run(run_load_test(args.concurrent))
+    print(
+        f"Running load test: {n} /task add commands + {n} app_mention events (1:1), "
+        f"{n} in flight per phase, team {TEST_TEAM_ID}, db {ALLOWED_DB_NAME}..."
+    )
+    result = asyncio.run(run_load_test(n))
 
-    print("\n=== /slack/events ===")
-    print(f"p50: {events_pct['p50']:.2f}ms")
-    print(f"p95: {events_pct['p95']:.2f}ms")
-    print(f"p99: {events_pct['p99']:.2f}ms")
-    print(f"max: {events_pct['max']:.2f}ms")
+    commands_p95, commands_ok = _report("/slack/commands (/task add)", result["commands"])
+    events_p95, events_ok = _report("/slack/events (app_mention)", result["events"])
 
-    print("\n=== /slack/commands ===")
-    print(f"p50: {commands_pct['p50']:.2f}ms")
-    print(f"p95: {commands_pct['p95']:.2f}ms")
-    print(f"p99: {commands_pct['p99']:.2f}ms")
-    print(f"max: {commands_pct['max']:.2f}ms")
+    counts = result["counts"]
+    total = len(result["commands"]) + len(result["events"])
+    print("\n=== database verification ===")
+    print(f"200 responses:  {commands_ok + events_ok} of {total}")
+    print(f"tasks created:  {counts['tasks']} (successful /task add responses: {commands_ok})")
+    print(f"jobs created:   {counts['jobs']} (successful events: {events_ok})")
 
-    # Assert p95 < 3000ms for both endpoints
-    max_p95 = max(events_pct["p95"], commands_pct["p95"])
-    THRESHOLD_MS = 3000
-    if max_p95 < THRESHOLD_MS:
-        print(f"\n✓ PASS: p95 ({max_p95:.2f}ms) < {THRESHOLD_MS}ms")
-        sys.exit(0)
-    else:
-        print(f"\n✗ FAIL: p95 ({max_p95:.2f}ms) >= {THRESHOLD_MS}ms")
+    failures = []
+    if commands_ok + events_ok != total:
+        failures.append(f"{total - commands_ok - events_ok} of {total} responses were not 200")
+    if counts["tasks"] != commands_ok:
+        failures.append(f"tasks created {counts['tasks']} != successful /task add {commands_ok}")
+    if counts["jobs"] != events_ok:
+        failures.append(f"jobs created {counts['jobs']} != successful events {events_ok}")
+    max_p95 = max(commands_p95, events_p95)
+    if max_p95 >= THRESHOLD_MS:
+        failures.append(f"p95 ({max_p95:.2f}ms) >= {THRESHOLD_MS}ms")
+
+    if failures:
+        for failure in failures:
+            print(f"\n✗ FAIL: {failure}")
         sys.exit(1)
+    print(f"\n✓ PASS: all checks ok, p95 ({max_p95:.2f}ms) < {THRESHOLD_MS}ms")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

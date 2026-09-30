@@ -16,7 +16,9 @@ prose or paths written inside a list, and a path with a line range such as `:10-
 missing, so write it without the range.
 
 **Status, 2026-09-30.** Feature-complete and merged to `main` (PR #1, 2026-09-29), CI green.
-Tests: 222 collected <!-- check:test-count=222 -->. Migration head: 0009 <!-- check:migration-head=0009 -->.
+Tests: 441 collected <!-- check:test-count=441 -->. Migration head: 0009 <!-- check:migration-head=0009 -->.
+Stress-tested and hardened 2026-09-30 (`docs/BUILD-LOG.md`, section 0.13): load, abuse, migration
+rehearsal and a security review, with the defects they found fixed.
 
 ## YOUR TASKS
 
@@ -77,6 +79,7 @@ app/api/routes_events.py        /slack/events
 app/api/routes_commands.py      /slack/commands
 app/api/routes_interactions.py  /slack/interactions (Block Kit buttons)
 app/api/routes_internal.py      /internal/tick
+app/api/request_guards.py       shared by the three signed routes: body cap, strict parsing, installed check
 app/core/config.py          Settings (env vars). app/core/db.py async engine. app/core/security.py
                             Slack signature verify + TokenCipher (Fernet with key_version).
                             app/core/slack_client.py builds a workspace's AsyncWebClient
@@ -90,7 +93,7 @@ app/calendar/               provider.py (CalendarProvider Protocol), google_cale
 app/agent/                  tools.py (whitelist + AgentContext), loop.py (Groq tool-calling loop)
 app/ui/blocks.py            Block Kit builders (task list, App Home, meeting buttons)
 alembic/versions/           migrations 0001 to 0009
-scripts/live_fire.py        drives real Slack/Google calls once each; scripts/load_test.py checks the 3s ack budget
+scripts/live_fire.py        drives real Slack/Google calls once each; scripts/load_test.py times the ack path in-process (no worker) and verifies the rows it created
 scripts/check_docs.py       docs drift check
 ```
 
@@ -98,10 +101,17 @@ There is no Bolt: the app uses `slack-sdk`'s `AsyncWebClient` and does its own s
 
 ## 3. How requests flow
 
-- **Events** (`app/api/routes_events.py`): verify the Slack signature over the raw body (5-minute
-  replay window, constant-time compare), answer `url_verification`, dedupe on `event_id`
-  (`processed_events`), enqueue an `InboundJob` only for `app_mention`, `app_uninstalled` and
-  `app_home_opened`, return 200.
+- **Every signed route** (`/slack/events`, `/slack/commands`, `/slack/interactions`) runs the same
+  pipeline, in this order: read the body with a 1 MB cap (413, or 400 for a non-numeric
+  Content-Length), check the signing secret is set (500 if not), verify the signature (crafted or
+  non-ASCII headers give 401, never 500), parse strictly (malformed gives a generic 400, never echoing
+  input), then `is_workspace_installed`, and only then touch the database. A missing or uninstalled
+  team is ignored (`{"status":"ignored"}` for events and interactions; commands reply with an
+  ephemeral "isn't installed" message). The cap, parsing and installed check live in
+  `app/api/request_guards.py`; the secret and signature checks are written inline in each route.
+- **Events** (`app/api/routes_events.py`): answer `url_verification`, ignore events whose `user_team`
+  differs from the team (Slack Connect), dedupe on `event_id` (`processed_events`), enqueue an
+  `InboundJob` only for `app_mention`, `app_uninstalled` and `app_home_opened`, return 200.
 - **Slash commands** (`app/api/routes_commands.py`, signature verified):
 
   | Command | Handled |
@@ -114,7 +124,12 @@ There is no Bolt: the app uses `slack-sdk`'s `AsyncWebClient` and does its own s
 
   All three `/meet` forms reply inline "Calendar scheduling isn't configured" and enqueue nothing
   unless the Google and encryption settings are all set. `/meet book` and `/meet cancel` do no
-  organiser check inline; `meeting_service` enforces it in the worker.
+  organiser check inline; `meeting_service` enforces it in the worker. A command that carries a
+  Slack `trigger_id` is also de-duplicated (key `cmd:{team_id}:{trigger_id}` in `processed_events`):
+  a replayed signed command replies "Duplicate request ignored." The key is committed only by handlers
+  that commit (`/task add`, `done`, `reassign`, `/link-calendar`, the `/meet` enqueues); an
+  early-return reply (usage or parse error, not authorized, not configured, `/task list`) rolls it
+  back, so those can be retried.
 
 - **Buttons** (`app/api/routes_interactions.py`, signature verified, first action only):
   `task_done` runs `mark_task_done` inline through the same authorization as `/task done`;
@@ -124,10 +139,18 @@ There is no Bolt: the app uses `slack-sdk`'s `AsyncWebClient` and does its own s
   `meet_cancel`, `app_uninstalled`, `app_home_opened` to functions. An unknown type or a raised
   exception marks the job failed and logs it; nothing is silently marked done. The worker never
   sends or claims reminders (the `create_task` agent tool can still create reminder rows).
-- **Reminders**: `POST /internal/tick` (header `X-Cron-Secret`, `hmac.compare_digest`) runs
-  `process_due_reminders` (`FOR UPDATE SKIP LOCKED`, skips reminders whose task is not open),
-  then deletes `processed_events` older than 7 days. Nothing else drives it: in dev, POST to it
-  yourself; in production cron-job.org would, every 5 minutes. Reminder DMs carry a Mark done button.
+- **Reminders**: `POST /internal/tick` (header `X-Cron-Secret`, compared as bytes with
+  `hmac.compare_digest`) runs `process_due_reminders` (`FOR UPDATE SKIP LOCKED`, skips reminders
+  whose task is not open), then deletes `processed_events` older than 7 days and expired
+  `oauth_states`. Nothing else drives it: in dev, POST to it yourself; in production cron-job.org
+  would, every 5 minutes. Reminder DMs carry a Mark done button. No Slack failure can block the rest
+  or fail the tick: a permanent Slack error (`PERMANENT_SLACK_ERRORS` in `app/scheduler.py`, 14
+  codes) or an undecryptable token marks the reminder sent; any transient failure releases the claim
+  and pushes `fire_at_utc` back `RETRY_BACKOFF_SECONDS` (300, in
+  `app/repositories/reminder_repository.py`) so retries sort behind healthy reminders. DMs go to the
+  assignee first and, only for the overdue reminder, then the creator, each at most once.
+  `reminders_sent` in the response counts reminders where at least one DM was delivered. A database
+  error in the loop can still surface as a 500.
 - **@mention** goes `handle_app_mention`, then `app/agent/loop.py` (Groq `openai/gpt-oss-120b`),
   then one of four tools: `create_task`, `list_tasks`, `get_digest`, `propose_meeting`. No tool
   takes `team_id` or `slack_user_id`; both come from `AgentContext`. There is no book or cancel tool.
@@ -224,6 +247,18 @@ batches, every batch had at least one real defect its own tests missed, so the r
    and its reply is plain text on purpose because the LLM composes it.
 10. **Migrating the live DB and restarting uvicorn is a manual pair.** A restart on new code before
     the migration breaks every task query.
+11. **Input limits live in the parsers and agent schemas** and reject loudly: task title 1 to 200
+    characters, due date between 2000-01-01 and 2100-01-01 UTC, `repeat:N` 1 to 365; `/meet`
+    duration 5 to 480 minutes, window at most 31 days and inside 2000 to 2100, duplicate
+    participants collapsed. Dates beyond those ranges used to crash with `OverflowError`.
+12. **User text going into Slack must pass `escape_mrkdwn`** (`app/ui/blocks.py`, which escapes `&`,
+    `<` and `>`), or a title like `<!channel>` goes live. The agent's reply has `<!` neutralised. Escape
+    once, at the point of interpolation.
+13. **`/task list` and App Home show at most `MAX_TASKS_SHOWN` = 24 tasks** (two blocks each; Slack
+    allows 50 per message and 100 in App Home), earliest due first, then "…and N more open tasks".
+14. **Logging tests cannot rely on `caplog` alone**: alembic's `fileConfig` disables existing loggers
+    once the migration tests have run, so either attach a handler to the logger directly or set
+    `logger.disabled = False` first.
 
 ## 9. Deliberately not built
 
@@ -231,6 +266,20 @@ Hosting (Render, Supabase, cron-job.org were researched; see `docs/BUILD-LOG.md`
 verification, Outlook, an observability package, rate limiting and audit logging, a scheduled
 digest, and a separate worker process. The Slack scopes `users:read` and `im:history` are requested
 but unused; dropping them would force a re-authorization of the installed workspace.
+
+**Known limitations**, found by the 2026-09-30 stress test and security review
+(`docs/BUILD-LOG.md`, section 0.13) and deliberately left:
+- The Google link URL is a bearer link: whoever completes it binds their Google account to the Slack
+  user that ran `/link-calendar`, so never forward your own link. Fixing it needs a confirmation step
+  that compares the Google email with the Slack profile.
+- A persistently failing reminder is retried every 5 minutes with no attempt cap. If the assignee's DM
+  goes out and the creator's overdue copy then fails transiently, the creator's copy is dropped.
+- Double-clicking Book or Mark done can race (two calendar events, two recurring successors).
+- There is no rate limiting: one member spamming @mentions can exhaust the shared Groq key and delay
+  the single job queue. The agent's replies can still carry `<@U...>` pings and links, and the agent's
+  `list_tasks` tool is unbounded.
+- The Dockerfile runs as root, dependencies are floor-pinned with no lockfile, and git history still
+  holds an old real Slack team ID, user ID and ngrok hostname (not credentials).
 
 ## 10. Where to look
 
