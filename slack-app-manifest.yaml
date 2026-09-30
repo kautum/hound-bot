@@ -41,7 +41,7 @@ settings:
 slash_commands:
   - command: /task
     description: Create, list, or complete tasks with deadlines
-    usage_hint: "add @assignee Title | 2026-09-10T17:00+00:00 / list / done <task-id>"
+    usage_hint: "add @user title | due [| repeat:N]  ·  list  ·  done <id>  ·  reassign <id> @user"
     should_escape: false
   - command: /link-calendar
     description: Link your Google Calendar for meeting scheduling
@@ -49,5 +49,5 @@ slash_commands:
     should_escape: false
   - command: /meet
     description: Find mutual free time and book meetings
-    usage_hint: "@user1 @user2 30 | 2026-09-10T09:00+00:00 | 2026-09-10T17:00+00:00"
+    usage_hint: "@user1 @user2 <minutes> | <start> | <end>  ·  book <id>  ·  cancel <id>"
     should_escape: false

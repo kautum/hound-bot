@@ -1,7 +1,7 @@
 ## Live-fire steps 1-2, run for real — 2026-09-21
 
 Ran directly against the running app over the public ngrok tunnel, real Slack workspace
-`T0C077J6873`, real user `U0C059EQ4UA`, real Postgres. Real response bodies below, not
+`<team_id>`, real user `<user_id>`, real Postgres. Real response bodies below, not
 summarized.
 
 **Before this could run, a real incident happened and was fixed** — recorded here rather

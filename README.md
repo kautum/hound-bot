@@ -11,7 +11,7 @@ All external services are free-tier. See `ARCHITECTURE.md` for the full system d
 
 ## Status
 
-**All seven phases of the code are built and tested (193 tests, all passing against real Postgres).** Read `PROJECT-WIKI.md` before changing anything — it has the module map, the Devin usage guide, and the specific bugs several review passes found (each one caught something a passing test suite had been hiding). What's *not* built: observability, timeouts/backoff, and load testing.
+**All eight phases in the table below are built and tested (222 tests, all passing against real Postgres).** <!-- check:test-count=222 --> Read `PROJECT-WIKI.md` before changing anything — it has the module map, the Devin usage guide, and the specific bugs several review passes found (each one caught something a passing test suite had been hiding). What's *not* built: observability (no observability package exists). Load testing exists (`scripts/load_test.py`) and outbound HTTP calls have timeouts.
 
 | Phase | What it covers |
 |---|---|
@@ -20,7 +20,7 @@ All external services are free-tier. See `ARCHITECTURE.md` for the full system d
 | 3 — Tasks & reminders | CRUD, `/task` command (add/list/done/reassign/recurring), escalation ladder, scheduler tick |
 | 4 — Calendar & scheduling | `CalendarProvider` interface, Google implementation, availability intersection, meeting propose/book/cancel |
 | 5 — LLM layer | Groq-backed agent loop over a whitelisted, Pydantic-validated tool registry, including an on-demand digest tool |
-| 6 — Analytics | Task completion rate, overdue count, on-demand weekly digest (`@bot digest` or `get_digest` tool) |
+| 6 — Analytics | Task completion rate, overdue count, on-demand weekly digest (the `get_digest` agent tool, reached by @mentioning the bot in natural language; there is no digest command) |
 | 7 — Hardening | Dockerfile, Render config, CI (see below) |
 | 8 — UI | Block Kit "Mark done" buttons on `/task list`, reminder DMs, and the App Home tab; "Book"/"Cancel" buttons on `/meet` — all via a signed `/slack/interactions` endpoint |
 

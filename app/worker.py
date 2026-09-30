@@ -73,7 +73,7 @@ async def handle_app_mention(
 
     if not settings.groq_api_key:
         # Fail visibly to the user rather than pretending the request was
-        # understood — see ENGINEERING.md's "fail loud, not plausible" rule.
+        # understood: fail loud, never return a plausible-looking answer.
         await client.chat_postMessage(
             channel=channel, text="Natural-language requests aren't set up on this workspace yet."
         )

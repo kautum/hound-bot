@@ -14,7 +14,7 @@ Requirements:
     - All environment variables must be set (DATABASE_URL, SLACK_SIGNING_SECRET, etc.)
     - The app must be running locally with ngrok (PUBLIC_BASE_URL points to it)
     - A real Slack workspace must be installed with the bot
-    - A Google account must be linked (kpkautum2643@gmail.com)
+    - A Google account must be linked (the account behind TEST_USER_ID)
 """
 
 import argparse
@@ -48,12 +48,12 @@ from app.repositories.workspace_repository import WorkspaceRepository
 from sqlalchemy import select
 
 
-# Test values - these should match the real installed workspace
-# From PROJECT-WIKI.md: team_id=T0C077J6873 for "Devin Bot" workspace
-TEST_TEAM_ID = os.environ.get("TEST_TEAM_ID", "T0C077J6873")
-TEST_USER_ID = os.environ.get("TEST_USER_ID", "U0123456789")  # Replace with real user ID
+# Test values come only from the environment; real IDs must never be committed.
+TEST_TEAM_ID = os.environ.get("TEST_TEAM_ID", "")
+TEST_USER_ID = os.environ.get("TEST_USER_ID", "")
 TEST_CHANNEL_ID = os.environ.get("TEST_CHANNEL_ID", "C0123456789")  # Replace with real channel
-TEST_UNLINKED_USER_ID = os.environ.get("TEST_UNLINKED_USER_ID", "U0987654321")  # Second user for /meet
+TEST_UNLINKED_USER_ID = os.environ.get("TEST_UNLINKED_USER_ID", "")  # Second user for /meet
+REQUIRED_ENV_VARS = ("TEST_TEAM_ID", "TEST_USER_ID", "TEST_UNLINKED_USER_ID")
 
 
 def print_step_header(step_num: int, description: str) -> None:
@@ -107,10 +107,10 @@ def dry_run_plan() -> None:
     
     print("Requirements:")
     print(f"  - PUBLIC_BASE_URL: {settings.public_base_url}")
-    print(f"  - TEST_TEAM_ID: {TEST_TEAM_ID}")
-    print(f"  - TEST_USER_ID: {TEST_USER_ID}")
+    print(f"  - TEST_TEAM_ID: {TEST_TEAM_ID or '<unset>'}")
+    print(f"  - TEST_USER_ID: {TEST_USER_ID or '<unset>'}")
     print(f"  - TEST_CHANNEL_ID: {TEST_CHANNEL_ID}")
-    print(f"  - TEST_UNLINKED_USER_ID: {TEST_UNLINKED_USER_ID}")
+    print(f"  - TEST_UNLINKED_USER_ID: {TEST_UNLINKED_USER_ID or '<unset>'}")
     print()
 
 
@@ -505,7 +505,12 @@ async def main():
         dry_run_plan()
         return
     
-    # Check required environment variables
+    # Check required environment variables (before any network call)
+    for name in REQUIRED_ENV_VARS:
+        if not os.environ.get(name):
+            print(f"ERROR: {name} is not set (required unless --dry-run)")
+            sys.exit(1)
+
     if not settings.public_base_url:
         print("ERROR: PUBLIC_BASE_URL is not configured")
         sys.exit(1)

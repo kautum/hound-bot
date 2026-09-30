@@ -14,9 +14,13 @@ whichever channel you'll demo `/task` and `@mention` in — see `LIVE-FIRE.md`'s
    Shows the confirmation message land immediately. Proves the slash command works and
    parses a real due date.
 
-2. **Wait for the reminder DM to arrive** (fires on the next 5-minute tick in production;
-   locally, `/internal/tick` fires every 2 seconds via the worker's poll loop, so this is
-   near-instant). Show the DM appearing in Slack. This is the moment that actually proves
+2. **Wait for the reminder DM to arrive** (fires on the next 5-minute tick in production).
+   Locally nothing polls for reminders: the worker polls `inbound_jobs` every 2 seconds, but
+   reminders fire only when `POST /internal/tick` is called with the `X-Cron-Secret` header.
+   Trigger it off-camera with `scripts/live_fire.py --step 2` (POSTs to `PUBLIC_BASE_URL`'s
+   `/internal/tick`; needs `PUBLIC_BASE_URL`, `CRON_SHARED_SECRET`, `SLACK_SIGNING_SECRET` and
+   the `TEST_TEAM_ID`, `TEST_USER_ID`, `TEST_UNLINKED_USER_ID` variables set) or with a curl to
+   `/internal/tick` carrying that header. Show the DM appearing in Slack. This is the moment that actually proves
    the job queue + scheduler pipeline works, not just that a command was accepted.
 
 3. **`/task list`** — shows the Block Kit "Mark done" button rendering, not plain text.
@@ -28,7 +32,8 @@ whichever channel you'll demo `/task` and `@mention` in — see `LIVE-FIRE.md`'s
    <id>` (or click its button) — shows a second occurrence get created automatically,
    due exactly 7 days later. Proves recurrence without waiting a week for it to matter.
 
-5. **`@Hound digest`** in a channel Hound's been invited to (or DM Hound directly).
+5. **`@Hound digest`** in a channel Hound's been invited to (or DM Hound directly). This is
+   an @mention in natural language, not a command: the agent picks its `get_digest` tool.
    Shows the LLM-routed digest reply — real Groq call, real tool execution, real numbers
    from Postgres. If it doesn't come back in the digest's exact format, that's expected
    model non-determinism (see `LIVE-FIRE.md`) — just re-ask; a second take is fine.
@@ -65,6 +70,6 @@ whichever channel you'll demo `/task` and `@mention` in — see `LIVE-FIRE.md`'s
 
 ## After recording
 
-Save as `demo.mp4` (or `.gif` if short enough) at the repo root, embed it in `README.md`'s
+Save as `demo.mp4` (or `demo.gif` if short enough) at the repo root, embed it in `README.md`'s
 top section, and update `README.md`'s test-count line if further work changed the count
-since 193.
+since 222.

@@ -47,6 +47,9 @@ jobs:
       - name: Run lint
         run: ruff check app tests
 
+      - name: Check docs drift
+        run: python scripts/check_docs.py
+
       - name: Run tests
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/swa_test

@@ -1,4 +1,4 @@
-.PHONY: db-up db-down test lint run migrate
+.PHONY: db-up db-down test lint run migrate docs-check
 
 db-up:
 	@pg_isready -h localhost -p 5432 >/dev/null 2>&1 && echo "Postgres already up." || (echo "Start your local Postgres server (e.g. 'brew services start postgresql@14') then re-run make db-up." && exit 1)
@@ -19,3 +19,6 @@ lint:
 
 run:
 	uvicorn app.main:app --reload --port 8000
+
+docs-check:
+	python scripts/check_docs.py
