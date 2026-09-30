@@ -5,7 +5,7 @@ both OAuth flows (Slack install, Google account link). See ARCHITECTURE.md.
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.operational import OAuthState
@@ -55,17 +55,29 @@ class OAuthStateRepository:
 
     async def consume(self, state: str, *, expected_purpose: str) -> OAuthState | None:
         """Single-use: the row is deleted whether or not it's valid, so a
-        captured state value can't be replayed even within its TTL."""
-        result = await self._session.execute(select(OAuthState).filter_by(state=state))
+        captured state value can't be replayed even within its TTL.
+
+        One `DELETE ... RETURNING`, so two concurrent consumers can't both
+        get the row: the second blocks on the row lock and, once the first
+        commits, deletes (and returns) nothing."""
+        result = await self._session.execute(
+            delete(OAuthState).where(OAuthState.state == state).returning(OAuthState)
+        )
         row = result.scalar_one_or_none()
+        await self._session.flush()
         if row is None:
             return None
-
-        await self._session.delete(row)
-        await self._session.flush()
-
         if row.purpose != expected_purpose:
             return None
         if row.expires_at < datetime.now(UTC):
             return None
         return row
+
+    async def delete_expired(self) -> int:
+        """Purges rows past their expiry (abandoned installs, unused links).
+        Returns how many were deleted; the caller commits."""
+        result = await self._session.execute(
+            delete(OAuthState).where(OAuthState.expires_at < datetime.now(UTC))
+        )
+        await self._session.flush()
+        return result.rowcount

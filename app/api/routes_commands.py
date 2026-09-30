@@ -7,21 +7,33 @@ answered later via `response_url`, the same ack-and-enqueue shape
 dispatched by the `command` field — that's what this router does first.
 """
 
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.request_guards import (
+    MAX_EVENT_ID_LENGTH,
+    NOT_INSTALLED_TEXT,
+    bad_request,
+    is_workspace_installed,
+    parse_form,
+    read_limited_body,
+)
 from app.api.routes_google import PURPOSE_GOOGLE_LINK
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import verify_slack_signature
 from app.repositories.inbound_job_repository import InboundJobRepository
 from app.repositories.oauth_state_repository import OAuthStateRepository
+from app.repositories.processed_event_repository import ProcessedEventRepository
 from app.services import task_service
 from app.services.meet_command_parser import MeetCommandError, parse_meet_command
 from app.services.task_command_parser import MENTION_RE, TaskCommandError, parse_task_add
-from app.ui.blocks import build_task_list_blocks
+from app.ui.blocks import MAX_TASKS_SHOWN, build_task_list_blocks, escape_mrkdwn
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -55,15 +67,20 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
             recurrence_interval_days=recurrence_interval_days,
         )
         await session.commit()
-        return _ephemeral(f'Created task "{task.title}", due {due_at_utc.isoformat()}.')
+        return _ephemeral(
+            f'Created task "{escape_mrkdwn(task.title)}", due {due_at_utc.isoformat()}.'
+        )
 
     if text == "list":
-        tasks = await task_service.list_open_tasks(
-            session, team_id=team_id, assignee_slack_id=user_id
+        tasks, total_open = await task_service.list_open_tasks_page(
+            session, team_id=team_id, assignee_slack_id=user_id, limit=MAX_TASKS_SHOWN
         )
         if not tasks:
             return _ephemeral("No open tasks assigned to you.")
-        return {"response_type": "ephemeral", "blocks": build_task_list_blocks(tasks)}
+        return {
+            "response_type": "ephemeral",
+            "blocks": build_task_list_blocks(tasks, total_open=total_open),
+        }
 
     if text.startswith("done "):
         raw_id = text.removeprefix("done ").strip()
@@ -81,7 +98,7 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
         await session.commit()
         if task is None:
             return _ephemeral("No task found with that ID in this workspace.")
-        return _ephemeral(f'Marked "{task.title}" done.')
+        return _ephemeral(f'Marked "{escape_mrkdwn(task.title)}" done.')
 
     if text.startswith("reassign "):
         rest = text.removeprefix("reassign ").strip()
@@ -113,7 +130,10 @@ async def _handle_task_command(session: AsyncSession, form) -> dict:
         await session.commit()
         if task is None:
             return _ephemeral("No task found with that ID in this workspace.")
-        return _ephemeral(f'Reassigned "{task.title}" to <@{new_assignee_slack_id}>.')
+        return _ephemeral(
+            f'Reassigned "{escape_mrkdwn(task.title)}" to '
+            f"<@{escape_mrkdwn(new_assignee_slack_id)}>."
+        )
 
     return _ephemeral(
         "Usage:\n"
@@ -266,7 +286,7 @@ async def _handle_meet_command(session: AsyncSession, form) -> dict:
 async def slack_commands(
     request: Request, session: AsyncSession = Depends(get_session)
 ) -> dict:
-    raw_body = await request.body()
+    raw_body = await read_limited_body(request)
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
 
@@ -275,8 +295,25 @@ async def slack_commands(
     if not verify_slack_signature(raw_body, timestamp, signature, settings.slack_signing_secret):
         raise HTTPException(status_code=401, detail="invalid Slack signature")
 
-    form = await request.form()
-    command = str(form.get("command", ""))
+    form = parse_form(raw_body)
+    command = form.get("command", "")
+    team_id = form.get("team_id", "")
+    trigger_id = form.get("trigger_id", "")
+    if not command or not team_id or not form.get("user_id"):
+        raise bad_request("command, team_id or user_id missing")
+    if len(trigger_id) > MAX_EVENT_ID_LENGTH:
+        raise bad_request("trigger_id too long")
+
+    if not await is_workspace_installed(session, team_id):
+        logger.info("command for team %s ignored: workspace not installed", team_id)
+        return _ephemeral(NOT_INSTALLED_TEXT)
+
+    # Slack's trigger_id is unique per invocation, so a replayed signed request
+    # (same body, still inside the replay window) carries the same one.
+    if trigger_id and not await ProcessedEventRepository(session).mark_processed_if_new(
+        f"cmd:{team_id}:{trigger_id}", team_id
+    ):
+        return _ephemeral("Duplicate request ignored.")
 
     if command == "/task":
         return await _handle_task_command(session, form)

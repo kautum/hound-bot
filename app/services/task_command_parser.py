@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 
 MENTION_RE = re.compile(r"^<@([A-Z0-9]+)(?:\|[^>]*)?>\s*")
 
+MAX_TITLE_LENGTH = 200
+MIN_DUE_AT = datetime(2000, 1, 1, tzinfo=UTC)
+MAX_DUE_AT = datetime(2100, 1, 1, tzinfo=UTC)
+MAX_RECURRENCE_DAYS = 365
+
 
 class TaskCommandError(ValueError):
     """The command text didn't match the expected explicit syntax."""
@@ -45,10 +50,14 @@ def parse_task_add(text: str) -> tuple[str, str, datetime, int | None]:
     last_segment_stripped = last_segment.strip()
     repeat_match = re.match(r"^repeat:(-?\d+)$", last_segment_stripped)
     if repeat_match:
-        interval = int(repeat_match.group(1))
-        if interval <= 0:
+        try:
+            interval = int(repeat_match.group(1))
+        except ValueError:
+            interval = 0  # thousands of digits: int() refuses; reported as out of range below
+        if not 1 <= interval <= MAX_RECURRENCE_DAYS:
             raise TaskCommandError(
-                f"Recurrence interval must be a positive integer, got {interval}"
+                "Recurrence interval must be a positive integer of at most "
+                f"{MAX_RECURRENCE_DAYS} days"
             )
         recurrence_interval_days = interval
         rest = before_last_pipe
@@ -67,6 +76,10 @@ def parse_task_add(text: str) -> tuple[str, str, datetime, int | None]:
     due_raw = due_raw.strip()
     if not title:
         raise TaskCommandError("Task title cannot be empty")
+    if len(title) > MAX_TITLE_LENGTH:
+        raise TaskCommandError(f"Task title is too long (max {MAX_TITLE_LENGTH} characters)")
+    if "\x00" in title:
+        raise TaskCommandError("Task title contains an invalid character")
 
     try:
         due_at = datetime.fromisoformat(due_raw)
@@ -77,6 +90,12 @@ def parse_task_add(text: str) -> tuple[str, str, datetime, int | None]:
         raise TaskCommandError(
             f"Due date {due_raw!r} has no timezone — include one explicitly "
             "(e.g. 'Z' or '+00:00'); a guessed timezone is worse than an error"
+        )
+
+    # Compare before converting: astimezone(UTC) overflows near year 1 / 9999.
+    if not MIN_DUE_AT <= due_at <= MAX_DUE_AT:
+        raise TaskCommandError(
+            f"Due date {due_raw!r} is out of range — it must be between 2000-01-01 and 2100-01-01"
         )
 
     return assignee_slack_id, title, due_at.astimezone(UTC), recurrence_interval_days

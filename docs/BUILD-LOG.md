@@ -497,6 +497,56 @@ complexity for a portfolio demo). Kept as plain text on purpose, not an oversigh
 
 ---
 
+## 0.13. Session 2026-09-30: wiki rebuilt, subagent roles, stress test and hardening
+
+**Setup.** PR #1 was merged; git worked again (no more dulwich). `PROJECT-WIKI.md` was rewritten
+from this log into a code-verified map, `scripts/check_docs.py` was added as a drift guard, and four
+typed subagent roles were defined in `.claude/agents/` (the owner's instruction: subagents only, no
+forked chats). Custom agent types only load at session start, so in that session each role was run
+as a `general-purpose` agent told to read its role file first.
+
+**Found while checking the environment.** The live database was at migration 0008 while the code was
+at 0009, and the running server was the 2026-09-17 build. An earlier statement that no discrepancies
+existed had only verified the code and the test database. The live migration and the live-fire run
+were then blocked by Claude Code's permission layer and left to the owner, with exact commands in
+the wiki.
+
+**Stress test, run against scratch resources only** (never the live database, Slack or Google):
+- Migration rehearsal: the real backup restored into `swa_devin`, upgraded 0008 to 0009 in 0.4 s with
+  all rows byte-identical, downgraded and re-upgraded, no-op at head, ORM and `alembic check` clean.
+- Five consecutive full-suite runs: 222 of 222 every time (no flaky tests).
+- Load and abuse run (throwaway DB `swa_stress`, app on a separate port, requests signed with stdlib
+  `hmac`): p99 190 ms at 50 concurrent and 340 ms at 200 concurrent on `/task add`, zero 5xx, no
+  lost or duplicated writes; 200 concurrent identical events gave exactly one job; 400 simultaneous
+  requests all succeeded; no memory growth over 90 s; every cross-tenant or non-owner attempt left
+  the database unchanged. A first client (httpx) became the bottleneck above about 100 connections
+  and was discarded for latency purposes in favour of a raw-socket client.
+- Independent security review: no auth bypass, no cross-tenant leak, no credentials in git history.
+
+**Defects found, all fixed test-first and judged by an independent reviewer** (222 to 441 tests):
+crafted `X-Slack-Request-Timestamp` (309+ digits) and non-ASCII signature or cron-secret headers gave
+unauthenticated 500s; events, commands and buttons from a team with no workspace row gave 500 and
+Slack retries; structurally wrong but validly signed bodies gave 500; no body size cap before the
+signature check; slash commands could be replayed inside the 5-minute window; dates and `repeat:N`
+beyond range crashed or created tasks that could never complete; `/meet` accepted unbounded
+durations and windows; titles were unbounded and unescaped Slack mrkdwn; `/task list` returned 2 MB
+for a user with thousands of tasks; `oauth_states` was never purged and its `consume` was not
+atomic; docs endpoints were public. Most serious: **one reminder addressed to a nonexistent Slack
+user made `/internal/tick` return 500 on every call, blocking reminders for every workspace.** The
+reviewer then rejected the first fix because 10 or more persistently failing reminders could still
+starve healthy ones (proved with a probe); the final fix backs failed reminders off by 300 s.
+
+**Left on purpose** (listed under Known limitations in `PROJECT-WIKI.md`): Google link state
+fixation, double-click races, unbounded retry of a permanently failing reminder, no rate limiting,
+root Dockerfile.
+
+**Process notes.** A builder agent stalled for 600 s mid-batch; its edits were on disk, so it was
+resumed with the measured state rather than restarted. One test was wrong, not the code (migration
+tests disable loggers that `caplog` needs). Across these batches the reviewer mutation-tested the new
+tests (15 of 16, then 9 of 11, mutations killed) and found one real test gap, now closed.
+
+---
+
 # Appendix: superseded reference sections (as of 2026-09-22)
 
 The former sections 1-7 of `PROJECT-WIKI.md`, kept verbatim. Several statements below are known to be wrong today (112 tests, Block Kit "not built", three agent tools, the worker "claiming reminders"). `PROJECT-WIKI.md` has the current facts; this is here for the reasoning and the Devin invocation notes.

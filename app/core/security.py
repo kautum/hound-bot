@@ -48,18 +48,24 @@ def verify_slack_signature(
 
     try:
         request_time = int(timestamp)
-    except (TypeError, ValueError):
+        is_stale = abs((now if now is not None else time.time()) - request_time) > (
+            REPLAY_WINDOW_SECONDS
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if is_stale:
         return False
 
-    current_time = now if now is not None else time.time()
-    if abs(current_time - request_time) > REPLAY_WINDOW_SECONDS:
+    # Compare as bytes: hmac.compare_digest raises TypeError on non-ASCII str.
+    # A non-ASCII signature can never be valid, so reject it before comparing.
+    if not signature.isascii():
         return False
 
     basestring = f"{SLACK_SIGNATURE_VERSION}:{timestamp}:".encode() + raw_body
     digest = hmac.new(signing_secret.encode(), basestring, hashlib.sha256).hexdigest()
     expected_signature = f"{SLACK_SIGNATURE_VERSION}={digest}"
 
-    return hmac.compare_digest(expected_signature, signature)
+    return hmac.compare_digest(expected_signature.encode("ascii"), signature.encode("ascii"))
 
 
 class TokenCipher:

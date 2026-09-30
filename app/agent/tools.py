@@ -10,12 +10,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.calendar.provider import CalendarProvider
 from app.core.security import TokenCipher
 from app.services import analytics_service, meeting_service, task_service
+from app.services.meet_command_parser import (
+    MAX_DURATION_MINUTES,
+    MAX_WINDOW,
+    MIN_DURATION_MINUTES,
+)
+from app.services.task_command_parser import MAX_DUE_AT, MAX_TITLE_LENGTH, MIN_DUE_AT
+
+MAX_PARTICIPANTS = 7
 
 
 @dataclass
@@ -32,10 +40,35 @@ class AgentContext:
     cipher: TokenCipher | None = None
 
 
+def _require_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("must include a timezone offset")
+    return value
+
+
 class CreateTaskArgs(BaseModel):
     assignee_slack_id: str
     title: str
     due_at_utc: datetime
+
+    @field_validator("title")
+    @classmethod
+    def _check_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("title cannot be empty")
+        if len(value) > MAX_TITLE_LENGTH:
+            raise ValueError(f"title is too long (max {MAX_TITLE_LENGTH} characters)")
+        if "\x00" in value:
+            raise ValueError("title contains an invalid character")
+        return value
+
+    @field_validator("due_at_utc")
+    @classmethod
+    def _check_due(cls, value: datetime) -> datetime:
+        if not MIN_DUE_AT <= _require_aware(value) <= MAX_DUE_AT:
+            raise ValueError("due date must be between 2000-01-01 and 2100-01-01")
+        return value
 
 
 class ListTasksArgs(BaseModel):
@@ -51,6 +84,41 @@ class ProposeMeetingArgs(BaseModel):
     duration_minutes: int
     search_window_start_utc: datetime
     search_window_end_utc: datetime
+
+    @field_validator("participant_slack_ids")
+    @classmethod
+    def _check_participants(cls, value: list[str]) -> list[str]:
+        unique = list(dict.fromkeys(value))
+        if not 1 <= len(unique) <= MAX_PARTICIPANTS:
+            raise ValueError(f"need 1 to {MAX_PARTICIPANTS} distinct other participants")
+        return unique
+
+    @field_validator("duration_minutes")
+    @classmethod
+    def _check_duration(cls, value: int) -> int:
+        if not MIN_DURATION_MINUTES <= value <= MAX_DURATION_MINUTES:
+            raise ValueError(
+                f"duration must be between {MIN_DURATION_MINUTES} and "
+                f"{MAX_DURATION_MINUTES} minutes"
+            )
+        return value
+
+    @field_validator("search_window_start_utc", "search_window_end_utc")
+    @classmethod
+    def _check_aware(cls, value: datetime) -> datetime:
+        return _require_aware(value)
+
+    @model_validator(mode="after")
+    def _check_window(self) -> "ProposeMeetingArgs":
+        for value in (self.search_window_start_utc, self.search_window_end_utc):
+            if not MIN_DUE_AT <= value <= MAX_DUE_AT:
+                raise ValueError("search window must be between 2000-01-01 and 2100-01-01")
+        window = self.search_window_end_utc - self.search_window_start_utc
+        if window.total_seconds() <= 0:
+            raise ValueError("window end must be after window start")
+        if window > MAX_WINDOW:
+            raise ValueError("search window can be at most 31 days")
+        return self
 
 
 async def _handle_create_task(ctx: AgentContext, args: CreateTaskArgs) -> str:

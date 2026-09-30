@@ -68,8 +68,8 @@ flowchart TB
     SAPI --> SU
 ```
 
-**Ack-and-enqueue, always.** The web handler verifies the Slack signature, dedupes on
-`event_id`, writes a row, and returns `200` — under 3 seconds, every time. The actual work
+**Ack-and-enqueue, always.** The web handler caps the body size, verifies the Slack signature, checks the workspace is
+installed, dedupes on `event_id` (events) or `trigger_id` (commands), writes a row, and returns `200` — under 3 seconds, every time. The actual work
 (calendar queries, LLM calls, Slack replies) happens afterward on the in-process worker, which
 posts the result back as a *new* message rather than a synchronous reply.
 
@@ -87,7 +87,8 @@ in production the first time someone proposed a meeting with more than one or tw
 this exceed 3 seconds with a slow network or a few extra participants? If yes, enqueue it.
 
 **The cron tick does two jobs with one mechanism.** It drains due reminders and sweeps
-old `processed_events` rows (the scheduler's job; `inbound_jobs` are drained separately by the
+old `processed_events` rows and expired `oauth_states` (a reminder whose Slack call fails transiently
+is retried five minutes later; a permanent failure is dropped) (the scheduler's job; `inbound_jobs` are drained separately by the
 in-process worker) and it keeps Render's free service from spinning down after 15 minutes of
 idle, which would otherwise turn every cold request into a 30–60s stall that blows the 3-second
 budget. Reminder precision is therefore ±5 minutes — acceptable for "your report is due
