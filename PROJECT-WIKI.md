@@ -10,11 +10,13 @@ read instead of re-scanning the code. Design rationale is in `ARCHITECTURE.md`; 
 post-mortems are in `docs/BUILD-LOG.md` (history, not instructions). Facts here are machine-checked
 by `scripts/check_docs.py` (`make docs-check`, also a CI step), within limits: it verifies that each
 single backticked repo path exists and that the test-count and migration-head markers equal the
-truth. It does not check prose, paths written inside a list or with a line range, or markers inside
-code fences.
+truth (markers inside code fences are ignored, though fence parsing is approximate for unusual
+markdown, and a pytest run that errors fails the check instead of guessing). It does not check
+prose or paths written inside a list, and a path with a line range such as `:10-20` is reported as
+missing, so write it without the range.
 
 **Status, 2026-09-30.** Feature-complete and merged to `main` (PR #1, 2026-09-29), CI green.
-Tests: 211 collected <!-- check:test-count=211 -->. Migration head: 0009 <!-- check:migration-head=0009 -->.
+Tests: 222 collected <!-- check:test-count=222 -->. Migration head: 0009 <!-- check:migration-head=0009 -->.
 
 ## YOUR TASKS
 

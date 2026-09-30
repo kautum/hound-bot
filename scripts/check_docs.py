@@ -33,6 +33,7 @@ BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 MARKER_RE = re.compile(r"<!--\s*check:([a-z-]+)=(\S+?)\s*-->")
 MIGRATION_RE = re.compile(r"^(\d{4})_.*\.py$")
 COLLECTED_RE = re.compile(r"(\d+) tests? collected")
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 class UndeterminedError(Exception):
@@ -81,7 +82,19 @@ def find_markers(root: Path, name: str) -> dict[str, list[tuple[int, str]]]:
     doc = root / name
     if not doc.is_file():
         return found
+    fence = ""  # the opening fence string while inside a code block
     for lineno, line in enumerate(doc.read_text().splitlines(), start=1):
+        fence_match = FENCE_RE.match(line)
+        if fence_match:
+            token = fence_match.group(1)
+            if not fence:
+                fence = token
+                continue
+            if token[0] == fence[0] and len(token) >= len(fence):
+                fence = ""
+            continue
+        if fence:
+            continue
         for key, value in MARKER_RE.findall(line):
             found.setdefault(key, []).append((lineno, value))
     return found
@@ -107,13 +120,20 @@ def parse_collected_count(output: str) -> int:
 
 
 def collect_test_count(root: Path) -> int:
+    """Count tests via pytest --collect-only; a non-zero exit means the count is untrustworthy."""
     env = dict(os.environ)
     env.setdefault("DATABASE_URL", DUMMY_DATABASE_URL)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
         cwd=root, env=env, capture_output=True, text=True,
     )
-    return parse_collected_count(result.stdout + result.stderr)
+    output = result.stdout + result.stderr
+    if result.returncode != 0:
+        tail = "\n".join(output.strip().splitlines()[-10:])
+        raise UndeterminedError(
+            f"pytest --collect-only exited {result.returncode}; raw tail:\n{tail}"
+        )
+    return parse_collected_count(output)
 
 
 def check_markers(root: Path, test_count: int, head: str) -> list[str]:
@@ -139,10 +159,11 @@ def run_checks(root: Path, test_count: int, head: str) -> list[str]:
     return check_paths(root) + check_markers(root, test_count, head)
 
 
-def main() -> int:
-    root = Path(__file__).resolve().parent.parent
+def main(root: Path | None = None, count_fn=collect_test_count) -> int:
+    if root is None:
+        root = Path(__file__).resolve().parent.parent
     try:
-        findings = run_checks(root, collect_test_count(root), migration_head(root))
+        findings = run_checks(root, count_fn(root), migration_head(root))
     except UndeterminedError as exc:
         print(f"ERROR: {exc}")
         return 2

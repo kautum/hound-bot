@@ -11,7 +11,7 @@ All external services are free-tier. See `ARCHITECTURE.md` for the full system d
 
 ## Status
 
-**All eight phases in the table below are built and tested (211 tests, all passing against real Postgres).** <!-- check:test-count=211 --> Read `PROJECT-WIKI.md` before changing anything — it has the module map, the Devin usage guide, and the specific bugs several review passes found (each one caught something a passing test suite had been hiding). What's *not* built: observability (no observability package exists). Load testing exists (`scripts/load_test.py`) and outbound HTTP calls have timeouts.
+**All eight phases in the table below are built and tested (222 tests, all passing against real Postgres).** <!-- check:test-count=222 --> Read `PROJECT-WIKI.md` before changing anything — it has the module map, the Devin usage guide, and the specific bugs several review passes found (each one caught something a passing test suite had been hiding). What's *not* built: observability (no observability package exists). Load testing exists (`scripts/load_test.py`) and outbound HTTP calls have timeouts.
 
 | Phase | What it covers |
 |---|---|

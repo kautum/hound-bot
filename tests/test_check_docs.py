@@ -1,6 +1,7 @@
 """Tests for scripts/check_docs.py. Counts are passed in; pytest is never run inside pytest."""
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -141,3 +142,94 @@ def test_known_extension_always_checked_regardless_of_first_segment(tmp_path):
 
 def test_known_extension_existing_file_passes(tmp_path):
     assert paths_flagged(tmp_path, "`app/core/config.py` `README.md`\n") == []
+
+
+FENCED = "```\n<!-- check:test-count=5 -->\n```\n"
+
+
+def test_marker_only_inside_fence_counts_as_missing(tmp_path):
+    make_repo(tmp_path)
+    write(tmp_path, "README.md", FENCED)
+    assert check_docs.find_markers(tmp_path, "README.md") == {}
+    findings = check_docs.check_markers(tmp_path, 5, "0002")
+    assert findings == ["README.md: missing required marker check:test-count"]
+
+
+def test_tilde_and_longer_fences_hide_markers_and_lines_stay_correct(tmp_path):
+    make_repo(tmp_path)
+    text = (
+        "~~~\n<!-- check:test-count=1 -->\n~~~\n"
+        "````\n```\n<!-- check:test-count=2 -->\n````\n"
+        "<!-- check:test-count=5 -->\n"
+    )
+    write(tmp_path, "README.md", text)
+    assert check_docs.find_markers(tmp_path, "README.md") == {"test-count": [(8, "5")]}
+
+
+def test_marker_after_closed_fence_still_found(tmp_path):
+    make_repo(tmp_path)
+    write(tmp_path, "README.md", FENCED + "<!-- check:test-count=7 -->\n")
+    assert check_docs.find_markers(tmp_path, "README.md") == {"test-count": [(4, "7")]}
+
+
+def test_duplicate_marker_with_different_value_flagged(tmp_path):
+    make_repo(tmp_path)
+    write(tmp_path, "README.md", "<!-- check:test-count=5 -->\n<!-- check:test-count=9 -->\n")
+    findings = check_docs.check_markers(tmp_path, 5, "0002")
+    assert findings == ["README.md:2: check:test-count=9 but actual is 5"]
+
+
+def fake_run(returncode, stdout, stderr=""):
+    def run(*args, **kwargs):
+        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+    return run
+
+
+def test_collect_nonzero_returncode_is_undetermined_even_with_count(tmp_path, monkeypatch):
+    out = "203 tests collected, 1 error\nERROR tests/test_x.py"
+    monkeypatch.setattr(check_docs.subprocess, "run", fake_run(2, out))
+    with pytest.raises(check_docs.UndeterminedError, match="raw tail") as info:
+        check_docs.collect_test_count(tmp_path)
+    assert "ERROR tests/test_x.py" in str(info.value)
+
+
+def test_collect_zero_returncode_returns_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(check_docs.subprocess, "run", fake_run(0, "5 tests collected in 0.1s"))
+    assert check_docs.collect_test_count(tmp_path) == 5
+
+
+def test_main_exit_0_when_everything_matches(tmp_path, capsys):
+    make_repo(tmp_path)
+    assert check_docs.main(tmp_path, count_fn=lambda root: 5) == 0
+    assert "docs OK" in capsys.readouterr().out
+
+
+def test_main_exit_1_on_missing_path(tmp_path, capsys):
+    make_repo(tmp_path)
+    write(tmp_path, "RUNBOOK.md", "`app/nope.py`\n")
+    assert check_docs.main(tmp_path, count_fn=lambda root: 5) == 1
+    assert "RUNBOOK.md:1: app/nope.py" in capsys.readouterr().out
+
+
+def test_main_exit_1_on_wrong_marker(tmp_path, capsys):
+    make_repo(tmp_path)
+    assert check_docs.main(tmp_path, count_fn=lambda root: 6) == 1
+    assert "actual is 6" in capsys.readouterr().out
+
+
+def test_main_exit_1_on_fenced_only_marker(tmp_path, capsys):
+    make_repo(tmp_path)
+    write(tmp_path, "README.md", FENCED)
+    assert check_docs.main(tmp_path, count_fn=lambda root: 5) == 1
+    assert "missing required marker" in capsys.readouterr().out
+
+
+def test_main_exit_2_on_undetermined(tmp_path, capsys):
+    make_repo(tmp_path)
+
+    def boom(root):
+        raise check_docs.UndeterminedError("no count")
+
+    assert check_docs.main(tmp_path, count_fn=boom) == 2
+    assert "ERROR: no count" in capsys.readouterr().out

@@ -72,4 +72,4 @@ whichever channel you'll demo `/task` and `@mention` in — see `LIVE-FIRE.md`'s
 
 Save as `demo.mp4` (or `demo.gif` if short enough) at the repo root, embed it in `README.md`'s
 top section, and update `README.md`'s test-count line if further work changed the count
-since 211.
+since 222.
