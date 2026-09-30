@@ -22,31 +22,74 @@ rehearsal and a security review, with the defects they found fixed.
 
 ## YOUR TASKS
 
-Only the owner can do these. Claude Code's auto-mode blocked agents from items 1 and 3 (they change
+Only the owner can do these. Claude Code's auto-mode blocked agents from steps 2 and 4 (they change
 the live database or act on the live Slack workspace and Google account), so they are left here on
-purpose.
+purpose. Do them in order; each step says how to tell it worked. If anything looks wrong, stop and
+keep the output so a session can diagnose it.
 
-1. **Migrate the live database and restart the server.** The live DB (`slack_workplace_assistant`)
-   is at migration 0008 and the code needs 0009 (`tasks.recurrence_interval_days`). The running
-   uvicorn started 2026-09-17, before recurring tasks existed. A backup taken 2026-09-30 is at
-   `~/hound-backups/slack_workplace_assistant-pre0009.sql`. Then:
-   `CONFIRM_LIVE_ALEMBIC=slack_workplace_assistant .venv/bin/alembic upgrade head`, stop the old
-   uvicorn, start `.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000`.
-2. **Google Calendar link.** Publish the OAuth app to "In production" (Cloud Console, Audience,
-   Publish app) *before* re-linking with `/link-calendar`, or the refresh token dies again after
-   7 days. See `LIVE-FIRE.md` for whether the current token is alive.
-3. **Live-fire steps 3 to 5** (real Google freeBusy, `/meet` propose, `/meet` book), after items 1
-   and 2, so the server runs current code. From the repo root export `TEST_TEAM_ID`
-   (`select team_id from workspaces`), `TEST_USER_ID` (`select slack_user_id from users`) and
-   `TEST_UNLINKED_USER_ID` (any well-formed nonexistent ID, for example `UAAAAAAAAA`), then run
-   `.venv/bin/python scripts/live_fire.py --step 3`, then `--step 4`, then `--step 5 --meeting-id <id>`
-   with the id step 4 prints. Step 3 also tells you whether the Google token is alive. Afterwards run
-   `/meet cancel <id>` in Slack to delete the booked event. Paste the raw output, with IDs
-   redacted, into `LIVE-FIRE.md`. If a step fails, that is the finding; hand it to `hound-builder`.
-4. **Record the demo** following `DEMO-SHOTLIST.md`, save it as `demo.mp4` at the repo root, and
-   embed it in `README.md`.
-5. **Merge the open docs/subagents PR**, https://github.com/kautum/hound-bot/pull/2 (agents may not
-   merge to `main`).
+**1. Merge PR #3**, https://github.com/kautum/hound-bot/pull/3. CI is green. Agents may not merge to `main`.
+
+**2. Migrate the live database, then restart the server.** The live database is at migration 0008
+and the code needs 0009, and the running server is the 2026-09-17 build. A rehearsal on a restored
+copy of a real backup took 0.4 s, kept every row and reversed cleanly. In Terminal:
+
+```
+cd /Users/kpkautum/projects/slack-workplace-assistant/.claude/worktrees/slack-bot-scaffold
+pg_dump -h localhost slack_workplace_assistant > ~/hound-backups/before-0009-$(date +%Y%m%d-%H%M).sql
+CONFIRM_LIVE_ALEMBIC=slack_workplace_assistant .venv/bin/alembic upgrade head
+psql -h localhost -d slack_workplace_assistant -Atc "select version_num from alembic_version"
+```
+
+Expect "Running upgrade 0008 -> 0009", then `0009`. Only after that, restart the server:
+
+```
+pgrep -fl "uvicorn app.main"
+kill <the number at the start of that line>
+nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 > ~/hound-uvicorn.log 2>&1 &
+sleep 4; curl -s localhost:8000/health
+```
+
+Expect `{"status":"ok","worker":"alive"}`. The ngrok tunnel keeps running; check with
+`pgrep -fl ngrok` (if it prints nothing, start `ngrok http --domain=<your ngrok domain> 8000`).
+Then type `/task list` in Slack: it should answer. The dump in `~/hound-backups` is your way back.
+
+**3. Publish the Google OAuth app, then re-link.** Do them in this order: a Google app left in
+"Testing" issues refresh tokens that expire after 7 days, so your 2026-09-10 link is dead anyway and
+a re-link before publishing would die again in a week.
+1. Open https://console.cloud.google.com and pick the project you made for Hound (top bar).
+2. Menu, then APIs & Services, then OAuth consent screen (Google may call it "Google Auth
+   Platform"), then Audience.
+3. Under "Publishing status: Testing" click Publish app and confirm. It becomes "In production".
+   No verification is needed; people just see an "unverified app" warning.
+4. In Slack, in any channel, type `/link-calendar` and click the link Hound sends.
+5. Choose your Google account. On "Google hasn't verified this app" click Advanced, then "Go to
+   (app name) (unsafe)", tick every permission box, and continue.
+6. The browser should show a small JSON message saying `linked` with your email. Anything else:
+   copy it.
+
+**4. Live-fire steps 3 to 5** (real Google freeBusy, `/meet` propose, `/meet` book), after steps 2
+and 3:
+
+```
+cd /Users/kpkautum/projects/slack-workplace-assistant/.claude/worktrees/slack-bot-scaffold
+export TEST_TEAM_ID=$(psql -h localhost -d slack_workplace_assistant -Atc "select team_id from workspaces limit 1")
+export TEST_USER_ID=$(psql -h localhost -d slack_workplace_assistant -Atc "select slack_user_id from users limit 1")
+export TEST_UNLINKED_USER_ID=UAAAAAAAAA
+.venv/bin/python scripts/live_fire.py --step 3
+.venv/bin/python scripts/live_fire.py --step 4
+.venv/bin/python scripts/live_fire.py --step 5 --meeting-id <the id step 4 printed>
+```
+
+Step 3 also proves the Google token is alive. Step 5 books a real event on your calendar: delete it
+afterwards by typing `/meet cancel <id>` in Slack, then check Google Calendar. Keep all the output
+and paste it into a new session to be recorded in `LIVE-FIRE.md` with IDs redacted. A failing step is
+a finding: paste it and ask for a fix.
+
+**5. Record the demo** following `DEMO-SHOTLIST.md` (10 shots; the reminder shot needs
+`.venv/bin/python scripts/live_fire.py --step 2`). On the Mac press Command+Shift+5, choose Record
+Selected Portion, record, then stop from the menu bar. Put the `.mov` in the repo folder and convert
+it (ffmpeg is installed): `ffmpeg -i demo.mov -vf scale=1280:-2 -an demo.mp4`. Aim for under 10 MB and
+90 seconds. Tell a session it is there and it will embed `demo.mp4` in `README.md`.
 
 ## 1. Run it locally
 
