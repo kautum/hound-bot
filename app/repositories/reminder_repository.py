@@ -4,12 +4,17 @@ Not a TenantScopedRepository for the same reason InboundJobRepository isn't.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reminder import Reminder
+
+# How far a reminder is pushed back when delivery fails transiently. Without
+# it a released row sorts straight back to the head of the claim query and a
+# few persistently failing reminders would monopolise every batch.
+RETRY_BACKOFF_SECONDS = 300
 
 
 class ReminderRepository:
@@ -56,6 +61,19 @@ class ReminderRepository:
         reminder = await self._session.get(Reminder, reminder_id)
         if reminder is not None:
             reminder.sent_at = datetime.now(UTC)
+            await self._session.flush()
+
+    async def release_claim(self, reminder_id: uuid.UUID) -> None:
+        """Puts a claimed-but-unsent reminder back in the pool so a later tick
+        retries it, no sooner than RETRY_BACKOFF_SECONDS from now. Used after
+        a transient delivery failure. Moving fire_at_utc forward is what keeps
+        a persistently failing reminder from sorting back to the head of
+        claim_due_batch and starving healthy ones. Nothing else reads
+        fire_at_utc: the escalation level is a stored column."""
+        reminder = await self._session.get(Reminder, reminder_id)
+        if reminder is not None and reminder.sent_at is None:
+            reminder.claimed_at = None
+            reminder.fire_at_utc = datetime.now(UTC) + timedelta(seconds=RETRY_BACKOFF_SECONDS)
             await self._session.flush()
 
     async def cancel_pending_for_task(self, task_id: uuid.UUID) -> None:

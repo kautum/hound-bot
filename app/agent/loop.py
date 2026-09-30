@@ -67,6 +67,12 @@ async def _execute_tool_call(ctx: AgentContext, call: dict) -> str:
     return await tool.handler(ctx, args)
 
 
+def _neutralise_broadcasts(text: str | None) -> str:
+    """Slack treats `<!channel>`, `<!here>` and `<!everyone>` as live broadcasts.
+    The reply is model output shaped by user input, so defuse every `<!`."""
+    return (text or "").replace("<!", "&lt;!")
+
+
 async def run_agent_turn(
     ctx: AgentContext,
     http_client: httpx.AsyncClient,
@@ -83,7 +89,7 @@ async def run_agent_turn(
     message = await _call_groq(http_client, api_key, messages, tools=tool_schemas)
     tool_calls = message.get("tool_calls") or []
     if not tool_calls:
-        return message.get("content", "")
+        return _neutralise_broadcasts(message.get("content", ""))
 
     messages.append(message)
     for call in tool_calls:
@@ -91,4 +97,4 @@ async def run_agent_turn(
         messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
 
     final_message = await _call_groq(http_client, api_key, messages)
-    return final_message.get("content", "")
+    return _neutralise_broadcasts(final_message.get("content", ""))

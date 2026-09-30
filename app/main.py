@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
             worker_task.cancel()
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(install_router)
 app.include_router(events_router)
 app.include_router(commands_router)

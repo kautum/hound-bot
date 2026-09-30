@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 import respx
 from sqlalchemy import select
 
@@ -635,3 +636,17 @@ class TestSlackInteractionsEndpoint:
         assert response_url_route.calls.last is not None
         sent_json = json.loads(response_url_route.calls.last.request.content)
         assert "Invalid meeting ID" in sent_json["text"]
+
+
+class TestSendSlackResponseMalformedUrl:
+    # "not a url" raises httpx.UnsupportedProtocol (an HTTPError); the other two
+    # raise httpx.InvalidURL, which is NOT an HTTPError subclass.
+    @pytest.mark.parametrize("bad_url", ["not a url", "http://[::1", "https://a.b/\x00x"])
+    async def test_malformed_response_url_is_logged_not_raised(self, caplog, bad_url):
+        from app.api.routes_interactions import _send_slack_response
+
+        with caplog.at_level("WARNING"):
+            await _send_slack_response(bad_url, "hello")  # must not raise
+
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+        assert bad_url not in caplog.text

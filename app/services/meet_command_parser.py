@@ -4,9 +4,15 @@ is Phase 5's job, on top of this.
 """
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+from app.services.task_command_parser import MAX_DUE_AT, MIN_DUE_AT
 
 MENTION_RE = re.compile(r"<@([A-Z0-9]+)(?:\|[^>]*)?>")
+
+MIN_DURATION_MINUTES = 5
+MAX_DURATION_MINUTES = 480
+MAX_WINDOW = timedelta(days=31)
 
 USAGE = (
     "Usage: /meet @user1 @user2 30 | 2026-09-10T09:00+00:00 | 2026-09-10T17:00+00:00\n"
@@ -27,7 +33,10 @@ def _parse_utc_datetime(raw: str, label: str) -> datetime:
         raise MeetCommandError(
             f"{label} {raw!r} has no timezone — include one explicitly (e.g. 'Z' or '+00:00')"
         )
-    return dt.astimezone(UTC)
+    try:
+        return dt.astimezone(UTC)
+    except OverflowError as exc:
+        raise MeetCommandError(f"{label} {raw!r} is out of range") from exc
 
 
 def parse_meet_command(text: str) -> tuple[list[str], int, datetime, datetime]:
@@ -39,7 +48,8 @@ def parse_meet_command(text: str) -> tuple[list[str], int, datetime, datetime]:
         raise MeetCommandError(USAGE)
     head, start_raw, end_raw = (segment.strip() for segment in segments)
 
-    participants = MENTION_RE.findall(head)
+    # dict.fromkeys collapses duplicates but keeps first-mention order.
+    participants = list(dict.fromkeys(MENTION_RE.findall(head)))
     if not participants:
         raise MeetCommandError("Mention at least one other participant with @. " + USAGE)
 
@@ -53,12 +63,24 @@ def parse_meet_command(text: str) -> tuple[list[str], int, datetime, datetime]:
             f"Could not parse duration {duration_text!r} as an integer number of minutes"
         ) from exc
 
+    if not MIN_DURATION_MINUTES <= duration_minutes <= MAX_DURATION_MINUTES:
+        raise MeetCommandError(
+            f"Duration must be between {MIN_DURATION_MINUTES} and {MAX_DURATION_MINUTES} minutes."
+        )
+
     if not (1 <= len(participants) <= 7):
         raise MeetCommandError("Meetings support 2-8 participants total, including you.")
 
     window_start = _parse_utc_datetime(start_raw, "window start")
     window_end = _parse_utc_datetime(end_raw, "window end")
+    for label, value in (("start", window_start), ("end", window_end)):
+        if not MIN_DUE_AT <= value <= MAX_DUE_AT:
+            raise MeetCommandError(
+                f"Window {label} must be between 2000-01-01 and 2100-01-01 (UTC)."
+            )
     if window_end <= window_start:
         raise MeetCommandError("Window end must be after window start.")
+    if window_end - window_start > MAX_WINDOW:
+        raise MeetCommandError("The search window can be at most 31 days long.")
 
     return participants, duration_minutes, window_start, window_end

@@ -115,8 +115,9 @@ class TestSlackCommandsEndpoint:
         task = result.scalar_one()
         assert task.recurrence_interval_days == 7
 
-    async def test_bad_syntax_returns_usage_not_a_crash(self, api_client, monkeypatch):
+    async def test_bad_syntax_returns_usage_not_a_crash(self, api_client, db_session, monkeypatch):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
         body = _form_body(
             command="/task", text="add nonsense", team_id="T1", user_id="U1", channel_id="C1"
         )
@@ -126,8 +127,9 @@ class TestSlackCommandsEndpoint:
         assert response.status_code == 200
         assert "Usage" in response.json()["text"]
 
-    async def test_unknown_command_does_not_crash(self, api_client, monkeypatch):
+    async def test_unknown_command_does_not_crash(self, api_client, db_session, monkeypatch):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
         body = _form_body(command="/nonexistent", text="", team_id="T1", user_id="U1")
         response = await api_client.post(
             "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
@@ -141,6 +143,7 @@ class TestLinkCalendarCommand:
         self, api_client, db_session, monkeypatch
     ):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
         monkeypatch.setattr(
             "app.api.routes_commands.settings.public_base_url", "https://example.ngrok-free.app"
         )
@@ -171,8 +174,9 @@ class TestLinkCalendarCommand:
 
 
 class TestMeetCommand:
-    async def test_bad_syntax_returns_usage(self, api_client, monkeypatch):
+    async def test_bad_syntax_returns_usage(self, api_client, db_session, monkeypatch):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
         body = _form_body(command="/meet", text="nonsense", team_id="T1", user_id="U1")
         response = await api_client.post(
             "/slack/commands", content=body, headers=_signed_form_headers(body, SIGNING_SECRET)
@@ -224,8 +228,11 @@ class TestMeetCommand:
         assert jobs[0].payload["meeting_id"] == meeting_id
         assert jobs[0].payload["requesting_user_id"] == "U1"
 
-    async def test_degrades_gracefully_when_calendar_not_configured(self, api_client, monkeypatch):
+    async def test_degrades_gracefully_when_calendar_not_configured(
+        self, api_client, db_session, monkeypatch
+    ):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
         monkeypatch.setattr("app.api.routes_commands.settings.google_client_id", None)
         body = _form_body(
             command="/meet",
@@ -459,8 +466,9 @@ class TestTaskReassignCommand:
         assert reassign_response.status_code == 200
         assert "Reassigned" in reassign_response.json()["text"]
 
-    async def test_reassign_invalid_uuid(self, api_client, monkeypatch):
+    async def test_reassign_invalid_uuid(self, api_client, db_session, monkeypatch):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
         body = _form_body(
             command="/task",
             text="reassign not-a-uuid <@U2>",
@@ -561,8 +569,9 @@ class TestMeetCancelCommand:
         assert jobs[0].payload["meeting_id"] == meeting_id
         assert jobs[0].payload["requesting_user_id"] == "U1"
 
-    async def test_cancel_invalid_uuid(self, api_client, monkeypatch):
+    async def test_cancel_invalid_uuid(self, api_client, db_session, monkeypatch):
         monkeypatch.setattr("app.api.routes_commands.settings.slack_signing_secret", SIGNING_SECRET)
+        await _make_workspace(db_session, "T1")
         body = _form_body(
             command="/meet",
             text="cancel not-a-uuid",

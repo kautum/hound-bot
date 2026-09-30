@@ -25,8 +25,13 @@ from app.models.inbound_job import InboundJob
 from app.repositories.inbound_job_repository import InboundJobRepository
 from app.repositories.workspace_repository import WorkspaceRepository
 from app.services import meeting_service
-from app.services.task_service import list_open_tasks
-from app.ui.blocks import build_app_home_view, build_meeting_action_blocks
+from app.services.task_service import list_open_tasks_page
+from app.ui.blocks import (
+    MAX_TASKS_SHOWN,
+    build_app_home_view,
+    build_meeting_action_blocks,
+    escape_mrkdwn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +171,7 @@ async def handle_meet_propose(
 
     note = ""
     if result.unavailable_participants:
-        names = ", ".join(f"<@{p}>" for p in result.unavailable_participants)
+        names = ", ".join(f"<@{escape_mrkdwn(p)}>" for p in result.unavailable_participants)
         note = f"\n(Couldn't check {names} — not linked yet: `/link-calendar`)"
 
     blocks = build_meeting_action_blocks(
@@ -288,10 +293,10 @@ async def handle_app_home_opened(
     client = build_client_for_workspace(workspace, cipher)
     user_id = job.payload["user"]
 
-    tasks = await list_open_tasks(
-        session, team_id=job.team_id, assignee_slack_id=user_id
+    tasks, total_open = await list_open_tasks_page(
+        session, team_id=job.team_id, assignee_slack_id=user_id, limit=MAX_TASKS_SHOWN
     )
-    view = build_app_home_view(tasks)
+    view = build_app_home_view(tasks, total_open=total_open)
 
     await client.views_publish(user_id=user_id, view=view)
 

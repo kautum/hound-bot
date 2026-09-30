@@ -6,7 +6,6 @@ body exactly as with the other endpoints — the JSON-inside-a-form-field
 detail only affects what we do AFTER verifying the signature.
 """
 
-import json
 import logging
 import uuid
 
@@ -15,16 +14,27 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.request_guards import (
+    bad_request,
+    is_workspace_installed,
+    parse_form,
+    parse_json_object,
+    read_limited_body,
+)
 from app.core.config import settings
 from app.core.db import get_session
 from app.core.security import verify_slack_signature
 from app.models.meeting import Meeting
 from app.repositories.inbound_job_repository import InboundJobRepository
 from app.services import task_service
+from app.ui.blocks import escape_mrkdwn
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Actions whose `value` is a UUID string we act on; anything else is answered "Unknown action."
+KNOWN_VALUE_ACTIONS = {"task_done", "meet_book", "meet_cancel"}
 
 
 async def _send_slack_response(response_url: str, text: str) -> None:
@@ -36,7 +46,12 @@ async def _send_slack_response(response_url: str, text: str) -> None:
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(response_url, json={"response_type": "ephemeral", "text": text})
     except httpx.HTTPError:
-        logger.warning("failed to post interaction response to %s", response_url, exc_info=True)
+        logger.warning("failed to post interaction response", exc_info=True)
+    except (httpx.InvalidURL, ValueError) as exc:
+        # A malformed response_url. Deliberately no exc_info and no URL: the
+        # exception text can echo the URL, which is a per-interaction secret.
+        logger.warning("malformed response_url; interaction response not sent (%s)",
+                       type(exc).__name__)  # fmt: skip
 
 
 @router.post("/slack/interactions")
@@ -45,7 +60,7 @@ async def slack_interactions(
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    raw_body = await request.body()
+    raw_body = await read_limited_body(request)
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
 
@@ -54,24 +69,42 @@ async def slack_interactions(
     if not verify_slack_signature(raw_body, timestamp, signature, settings.slack_signing_secret):
         raise HTTPException(status_code=401, detail="invalid Slack signature")
 
-    form = await request.form()
+    form = parse_form(raw_body)
     payload_json = form.get("payload")
     if not payload_json:
-        raise HTTPException(status_code=400, detail="missing payload")
+        raise bad_request("missing payload")
 
-    payload = json.loads(payload_json)
+    payload = parse_json_object(payload_json, "interaction payload")
 
     actions = payload.get("actions", [])
+    if not isinstance(actions, list) or not all(isinstance(a, dict) for a in actions):
+        raise bad_request("actions is not a list of objects")
     if not actions:
         return {"status": "ignored"}
 
     action = actions[0]
     action_id = action.get("action_id")
     value = action.get("value")
+    if not isinstance(action_id, str):
+        raise bad_request("action_id is missing or not a string")
+    if action_id in KNOWN_VALUE_ACTIONS and not isinstance(value, str):
+        raise bad_request("action value is missing or not a string")
 
-    team_id = payload.get("team", {}).get("id")
-    user_id = payload.get("user", {}).get("id")
+    team = payload.get("team")
+    user = payload.get("user")
+    team_id = team.get("id") if isinstance(team, dict) else None
+    user_id = user.get("id") if isinstance(user, dict) else None
+    if not isinstance(team_id, str) or not team_id:
+        raise bad_request("team id is missing or not a string")
+    if not isinstance(user_id, str) or not user_id:
+        raise bad_request("user id is missing or not a string")
     response_url = payload.get("response_url")
+    if response_url is not None and not isinstance(response_url, str):
+        raise bad_request("response_url is not a string")
+
+    if not await is_workspace_installed(session, team_id):
+        logger.info("interaction for team %s ignored: workspace not installed", team_id)
+        return {"status": "ignored"}
 
     if action_id == "task_done":
         try:
@@ -102,7 +135,7 @@ async def slack_interactions(
             return {"status": "ok"}
 
         if response_url:
-            confirmation = f'Marked "{task.title}" done.'
+            confirmation = f'Marked "{escape_mrkdwn(task.title)}" done.'
             background_tasks.add_task(_send_slack_response, response_url, confirmation)
         return {"status": "ok"}
 

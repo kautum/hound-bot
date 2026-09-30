@@ -47,3 +47,29 @@ class TestParseMeetCommand:
     def test_rejects_end_before_start(self):
         with pytest.raises(MeetCommandError, match="after"):
             parse_meet_command("<@U1> 30 | 2026-09-10T17:00+00:00 | 2026-09-10T09:00+00:00")
+
+
+class TestAbsoluteWindowBounds:
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            ("2000-01-01T00:00:00+00:00", "2000-01-01T01:00:00+00:00"),
+            ("2099-12-31T23:00:00+00:00", "2100-01-01T00:00:00+00:00"),
+        ],
+    )
+    def test_window_inside_the_bounds_parses(self, start, end):
+        _, _, parsed_start, parsed_end = parse_meet_command(f"<@U2> 30 | {start} | {end}")
+        assert parsed_start.isoformat() == start
+        assert parsed_end.isoformat() == end
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            ("1999-12-31T23:00:00+00:00", "2000-01-01T00:30:00+00:00"),
+            ("2099-12-31T23:30:00+00:00", "2100-01-01T00:00:01+00:00"),
+            ("9999-12-31T18:00:00+00:00", "9999-12-31T23:59:59+00:00"),
+        ],
+    )
+    def test_window_outside_the_bounds_is_rejected(self, start, end):
+        with pytest.raises(MeetCommandError, match="2000-01-01 and 2100-01-01"):
+            parse_meet_command(f"<@U2> 30 | {start} | {end}")

@@ -132,3 +132,30 @@ class TestProposeMeetingTool:
         result = await TOOLS["propose_meeting"].handler(ctx, args)
         assert "Proposed 30 min" in result
         assert "2026-09-07T09:00:00+00:00" in result
+
+
+class TestProposeMeetingWindowBounds:
+    @staticmethod
+    def _args(start: datetime, end: datetime) -> ProposeMeetingArgs:
+        return ProposeMeetingArgs(
+            participant_slack_ids=["U2"],
+            duration_minutes=30,
+            search_window_start_utc=start,
+            search_window_end_utc=end,
+        )
+
+    def test_edges_inside_the_bounds_are_accepted(self):
+        self._args(datetime(2000, 1, 1, tzinfo=UTC), datetime(2000, 1, 1, 1, tzinfo=UTC))
+        self._args(datetime(2099, 12, 31, 23, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC))
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            (datetime(1999, 12, 31, 23, tzinfo=UTC), datetime(2000, 1, 1, 0, 30, tzinfo=UTC)),
+            (datetime(2099, 12, 31, 23, 30, tzinfo=UTC), datetime(2100, 1, 1, 0, 0, 1, tzinfo=UTC)),
+            (datetime(9999, 12, 31, 18, tzinfo=UTC), datetime(9999, 12, 31, 23, 59, tzinfo=UTC)),
+        ],
+    )
+    def test_window_outside_the_bounds_is_rejected(self, start, end):
+        with pytest.raises(ValueError, match="2000-01-01 and 2100-01-01"):
+            self._args(start, end)

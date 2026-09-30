@@ -65,6 +65,17 @@ async def list_open_tasks(
     return await TaskRepository(session, team_id).list(**filters)
 
 
+async def list_open_tasks_page(
+    session: AsyncSession, *, team_id: str, limit: int, assignee_slack_id: str | None = None
+) -> tuple[list[Task], int]:
+    """(first `limit` open tasks, earliest due first; total open count). Two
+    bounded queries instead of loading every row just to count and slice."""
+    repo = TaskRepository(session, team_id)
+    tasks = await repo.list_open_page(limit=limit, assignee_slack_id=assignee_slack_id)
+    total = await repo.count_open(assignee_slack_id=assignee_slack_id)
+    return tasks, total
+
+
 class TaskAuthorizationError(Exception):
     """Raised when the requester is neither the task's assignee nor its
     creator — mirrors meeting_service.MeetingConfirmationError's shape, so
